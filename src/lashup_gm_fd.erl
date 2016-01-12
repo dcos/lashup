@@ -1,12 +1,12 @@
 %%%-------------------------------------------------------------------
 %%% @author sdhillon
-%%% @copyright (C) 2015, <COMPANY>
+%%% @copyright (C) 2016, <COMPANY>
 %%% @doc
 %%%
 %%% @end
-%%% Created : 28. Dec 2015 10:57 AM
+%%% Created : 18. Jan 2016 9:45 PM
 %%%-------------------------------------------------------------------
--module(lashup_membership).
+-module(lashup_gm_fd).
 -author("sdhillon").
 
 -behaviour(gen_server).
@@ -22,23 +22,14 @@
   terminate/2,
   code_change/3]).
 
-%% These are the constants for the sizes of views from the lashup paper
--define(K, 6).
--define(C, 1).
--define(TOTAL_MEMBERS, 10000).
-
--define(ACTIVE_VIEW_SIZE, math:log10(?TOTAL_MEMBERS) + ?C).
--define(PASSIVE_VIEW_SIZE, ?K * (math:log10(?TOTAL_MEMBERS) + ?C)).
-
-
-
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {digraph}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -70,7 +61,8 @@ start_link() ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  {ok, #state{}}.
+  {ok, Digraph} = lashup_gm:get_digraph(),
+  {ok, #state{digraph = Digraph}}.
 
 %%--------------------------------------------------------------------
 %% @private

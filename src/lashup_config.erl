@@ -10,16 +10,22 @@
 -author("sdhillon").
 
 %% API
--export([arwl/0, prwl/0, contact_nodes/0]).
+-export([arwl/0, prwl/0, contact_nodes/0, protocol_period/0, ping_timeout/0]).
 
 %% Active Random Walk Length
 arwl() ->
-  application:get_env(lashup, arwl, 6).
+  application:get_env(lashup, arwl, 8).
 
 % Passive Random Walk Length
 prwl() ->
-  application:get_env(lashup, prwl, 3).
+  application:get_env(lashup, prwl, 5).
 
 %%
 contact_nodes() ->
   application:get_env(lashup, contact_nodes, []).
+
+protocol_period() ->
+  application:get_env(lashup, protocol_period, 300).
+
+ping_timeout() ->
+  application:get_env(lashup, ping_timeout, 100).
