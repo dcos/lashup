@@ -543,14 +543,13 @@ accumulate_membership(Member, Acc) ->
 trim_nodes(State) ->
   Now = erlang:monotonic_time(),
   Delta = erlang:convert_time_unit(86400, seconds, native),
-  Members =
-    ets:foldl(members, [],
-      fun(Member = #member{locally_updated_at = [LastHeard | _]}, Acc) when Now - LastHeard > Delta ->
-        [Member | Acc];
-        (_, Acc) ->
-          Acc
-      end
-    ),
+  MatchSpec = ets:fun2ms(
+    fun(Member = #member{locally_updated_at = [LastHeard | _]})
+      when Now - LastHeard > Delta andalso Member#member.node =/= node()
+      -> Member
+    end
+  ),
+  Members =  ets:select(members, MatchSpec),
   lists:foreach(fun(X) -> delete(X, State) end, Members).
 
 update_node_backoff_loop(Delay, Pid) ->
@@ -609,7 +608,7 @@ delete(Member = #member{}, _State = #state{digraph = Digraph}) ->
   case ets:lookup(members, Member#member.nodekey) of
     [Member] ->
       delete_node_ips(Member),
-      digraph:del_vertex(Member#member.node, Digraph),
+      digraph:del_vertex(Digraph, Member#member.node),
       ets:delete(members, Member#member.nodekey),
       ok;
     [] ->
