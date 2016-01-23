@@ -110,7 +110,6 @@ start_link() ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  lager:info("Hyparview membership starting up on node: ~p", [node()]),
   random:seed(erlang:phash2([node()]),
     erlang:monotonic_time(),
     erlang:unique_integer()),
@@ -125,7 +124,13 @@ init([]) ->
   reschedule_maybe_neighbor(30000),
   Window = lashup_utils:new_window(1000),
   reschedule_ping(60000),
-  {ok, _} = timer:apply_interval(60000, ?MODULE, poll_for_master_nodes, []),
+  spawn(?MODULE, poll_for_master_nodes, []),
+  {ok, _} = timer:apply_after(5000, ?MODULE, poll_for_master_nodes, []),
+  {ok, _} = timer:apply_after(15000, ?MODULE, poll_for_master_nodes, []),
+  {ok, _} = timer:apply_after(60000, ?MODULE, poll_for_master_nodes, []),
+  {ok, _} = timer:apply_after(120000, ?MODULE, poll_for_master_nodes, []),
+
+  {ok, _} = timer:apply_interval(30000, ?MODULE, poll_for_master_nodes, []),
   {ok, #state{passive_view = contact_nodes([]), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
 
 %%--------------------------------------------------------------------
@@ -384,12 +389,16 @@ try_do_join(State) ->
       error
   end.
 
-do_join(_State = #state{passive_view = []}) ->
-  false;
-
-do_join(_State = #state{passive_view = PassiveView}) ->
-  Node = choose_node(PassiveView),
-  try_connect_then_join(Node).
+do_join(State) ->
+  ContactNodes = contact_nodes(State),
+  lager:debug("Contact nodes found during join: ~p", [ContactNodes]),
+  case ContactNodes of
+    [] ->
+      false;
+    _ ->
+      Node = choose_node(ContactNodes),
+      try_connect_then_join(Node)
+  end.
 
 -spec try_connect_then_join(node()) -> boolean().
 try_connect_then_join(Node) ->

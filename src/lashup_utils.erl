@@ -74,7 +74,8 @@ maybe_poll_for_master_nodes() ->
   IPs = inet_res:lookup("master.mesos", in, a, [], 1000),
   Nodes = [erlang_nodes(IP) || IP <- IPs],
   NaiveNodes = [lists:flatten(io_lib:format("minuteman@~s", [inet:ntoa(IP)])) || IP <- IPs],
-  FlattenedNodes = lists:flatten(Nodes) ++ NaiveNodes,
+  NaiveNodesAtoms = [list_to_atom(X) || X <- NaiveNodes],
+  FlattenedNodes = lists:flatten(Nodes) ++ NaiveNodesAtoms,
   FlattenedNodesSet = ordsets:from_list(FlattenedNodes),
   FlattenedNodesSet.
 
