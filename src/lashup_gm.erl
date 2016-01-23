@@ -23,8 +23,7 @@
   multicast/1,
   set_metadata/1,
   get_neighbor_recommendations/1,
-  reachable/1,
-  reachable/2]).
+  reachable/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -40,6 +39,7 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 -include_lib("lashup.hrl").
 
+-record(node_path, {node, path}).
 -record(subscriber, {monitor_ref, node, pid}).
 -record(subscription, {node, pid, monitor_ref}).
 -record(state, {subscriptions = [], init_time, vclock_id, seed, active_view = [], metadata = undefined, digraph, subscribers = []}).
@@ -49,12 +49,15 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
--spec(reachable(IP :: inet:ip4_address(), Digraph :: digraph:graph()) -> true | false | maybe).
-reachable(IP, Digraph) ->
+-spec(reachable(IP :: inet:ip4_address()) -> true | false | maybe).
+reachable(IP) ->
   NodeIPs = ets:lookup(node_ips, IP),
-  Nodes = [Node || {_IP, Node} <- NodeIPs],
-  Reachability = [digraph:get_path(Digraph, node(), Node) =/= false || Node <- Nodes],
+  NodePaths = [ets:lookup(node_path, Node) || {_IP, Node} <- NodeIPs],
+  %% node_path is in a list because it came out an ets lookup
+  Reachability = [Path =/= [] || [#node_path{path = Path}] <- NodePaths],
   case {lists:member(true, Reachability), lists:member(false, Reachability)} of
+    _ when length(Reachability) == 0 ->
+      maybe;
     %% We have both trues and falses
     {true, true} ->
       maybe;
@@ -68,10 +71,6 @@ reachable(IP, Digraph) ->
     {true, false} ->
       true
   end.
--spec(reachable(IP :: inet:ip4_address()) -> true | false | maybe).
-reachable(IP) ->
-  {ok, Digraph} = get_digraph(),
-  reachable(IP, Digraph).
 
 get_digraph() ->
   gen_server:call(?SERVER, get_digraph).
@@ -132,6 +131,7 @@ init([]) ->
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
   ets:new(node_ips, [bag, named_table]),
   ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}]),
+  ets:new(node_path, [set, named_table, {keypos, #node_path.node}]),
   lashup_hyparview_events:subscribe(fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
   VClockID = {node(), erlang:phash2(random:uniform())},
   Metadata = base_metadata(),
@@ -605,12 +605,14 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
   end.
 
 %% ETS write functions
-delete(Member = #member{}, _State = #state{digraph = Digraph}) ->
+delete(Member = #member{}, State = #state{digraph = Digraph}) ->
   case ets:lookup(members, Member#member.nodekey) of
     [Member] ->
       delete_node_ips(Member),
       digraph:del_vertex(Digraph, Member#member.node),
       ets:delete(members, Member#member.nodekey),
+      update_node_path_cache(Member, State),
+      ets:delete(node_path, Member#member.node),
       ok;
     [] ->
       ok
@@ -623,7 +625,7 @@ delete_node_ips(_Member) ->
 
 
 
-persist(Member, _State = #state{digraph = Digraph}) ->
+persist(Member, State = #state{digraph = Digraph}) ->
   case ets:lookup(members, Member#member.nodekey) of
     [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
       NewIPs = maps:get(ips, Member#member.metadata, []),
@@ -656,7 +658,37 @@ persist(Member, _State = #state{digraph = Digraph}) ->
       lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NewNeighbors),
       ok
   end,
-  ets:insert(members, Member).
+  ets:insert(members, Member),
+  update_node_path_cache(Member, State).
+
+update_node_path_cache(Member, _State = #state{digraph = Digraph}) when Member#member.node =/= node() ->
+  Node = Member#member.node,
+  ets:insert(node_path, #node_path{node = Node, path = digraph:get_short_path(Digraph, node(), Node)}),
+  %% Hopefully this function doesn't cost hilarious amounts
+  %% TODO: Metrics!
+  NodePathFun =
+    fun(NodePath = #node_path{path = false}, Acc) ->
+      [NodePath#node_path.node|Acc];
+    (NodePath, Acc) ->
+      case lists:member(Node, NodePath#node_path.path) of
+        true ->
+          [NodePath#node_path.node|Acc];
+        false ->
+          Acc
+      end
+    end,
+  NodesToBust = ets:foldl(NodePathFun, [], node_path),
+  HandleBust =
+    fun(RemoteNode) ->
+      ets:insert(node_path, #node_path{node = RemoteNode, path = digraph:get_short_path(Digraph, node(), RemoteNode)})
+    end,
+  lists:foreach(HandleBust, NodesToBust);
+update_node_path_cache(_Member, _State) ->
+  ets:insert(node_path, #node_path{node = node(), path = []}),
+  ok.
+
+
+
 
 base_metadata() ->
   {ok, Socket} = gen_udp:open(0),
