@@ -53,7 +53,7 @@
 reachable(IP, Digraph) ->
   NodeIPs = ets:lookup(node_ips, IP),
   Nodes = [Node || {_IP, Node} <- NodeIPs],
-  Reachability = [digraph:get_path(Digraph, node(), Node) || Node <- Nodes],
+  Reachability = [digraph:get_path(Digraph, node(), Node) =/= false || Node <- Nodes],
   case {lists:member(true, Reachability), lists:member(false, Reachability)} of
     %% We have both trues and falses
     {true, true} ->
@@ -70,7 +70,8 @@ reachable(IP, Digraph) ->
   end.
 -spec(reachable(IP :: inet:ip4_address()) -> true | false | maybe).
 reachable(IP) ->
-  reachable(IP, get_digraph()).
+  {ok, Digraph} = get_digraph(),
+  reachable(IP, Digraph).
 
 get_digraph() ->
   gen_server:call(?SERVER, get_digraph).
@@ -631,16 +632,30 @@ persist(Member, _State = #state{digraph = Digraph}) ->
       lists:foreach(fun(IP) -> ets:delete(node_ips, {IP, Member#member.node}) end, IPsToRemove),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),
-      lists:foreach(fun(X) -> digraph:del_edge(Digraph, X) end, digraph:out_edges(Digraph, Member#member.node));
+      OldOutEdges = digraph:out_edges(Digraph, Member#member.node),
+      OldOutEdgesPlusVertexes = [ digraph:edge(Digraph, Edge) || Edge <- OldOutEdges],
+      EdgeDict = dict:from_list([{V2, E} || {E, _V1, V2, _Label} <- OldOutEdgesPlusVertexes]),
+
+      OldOutNeighbors = digraph:out_neighbours(Digraph, Member#member.node),
+      OldOutNeighborsSet = sets:from_list(OldOutNeighbors),
+      NewOutNeighbors = Member#member.active_view,
+      NewOutNeighborsSet = sets:from_list(NewOutNeighbors),
+      NeighborsToDeleteSet = sets:subtract(OldOutNeighborsSet, NewOutNeighborsSet),
+      NeighborsToAddSet = sets:subtract(NewOutNeighbors, OldOutNeighbors),
+      NeighborsToDelete = sets:to_list(NeighborsToDeleteSet),
+      NeighborsToAdd = sets:to_list(NeighborsToAddSet),
+      EdgesToDelete = lists:map(fun(X) -> dict:fetch(X, EdgeDict) end, NeighborsToDelete),
+      digraph:del_edges(Digraph, EdgesToDelete),
+      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NeighborsToAdd);
     [] ->
       IPsToAdd = maps:get(ips, Member#member.metadata, []),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),
       digraph:add_vertex(Digraph, Member#member.node),
+      NewNeighbors = Member#member.active_view,
+      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NewNeighbors),
       ok
   end,
-  NewNeighbors = Member#member.active_view,
-  lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NewNeighbors),
   ets:insert(members, Member).
 
 base_metadata() ->

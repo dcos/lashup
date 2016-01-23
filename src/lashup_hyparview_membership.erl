@@ -65,7 +65,8 @@
   join_window,
   pings_in_flight = orddict:new(),
   ping_idx = 1,
-  joined = false
+  joined = false,
+  extra_masters = []
 }).
 
 %%%===================================================================
@@ -125,7 +126,7 @@ init([]) ->
   Window = lashup_utils:new_window(1000),
   reschedule_ping(60000),
   {ok, _} = timer:apply_interval(60000, ?MODULE, poll_for_master_nodes, []),
-  {ok, #state{passive_view = contact_nodes(), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
+  {ok, #state{passive_view = contact_nodes([]), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -228,10 +229,9 @@ handle_cast(PingMessage = #{message := ping}, State) ->
 handle_cast(PongMessage = #{message := pong}, State) ->
   State1 = handle_pong(PongMessage, State),
   {noreply, check_state(State1)};
-handle_cast({masters, List}, State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
-  List1 = ordsets:subtract(List, ActiveView),
-  NewPassiveView = ordsets:union(PassiveView, List1),
-  State1 = State#state{passive_view = NewPassiveView},
+handle_cast({masters, List}, State) ->
+  MasterSet = ordsets:del_element(node(), List),
+  State1 = State#state{extra_masters = MasterSet},
   {noreply, check_state(State1)};
 handle_cast(Request, State) ->
   lager:debug("Received unknown cast: ~p", [Request]),
@@ -590,7 +590,7 @@ maybe_neighbor(State = #state{passive_view = PassiveView, active_view = ActiveVi
     %% Hydrate the passive view with contact nodes, and reschedule immediately
     {[], []} ->
       reschedule_maybe_neighbor(500),
-      ContactNodes = ordsets:from_list(contact_nodes()),
+      ContactNodes = ordsets:from_list(contact_nodes(State)),
       State#state{passive_view = ContactNodes};
     %% We have nodes in the active view, but none in the passive view
     %% This is concerning, but not necessarily bad
@@ -598,7 +598,7 @@ maybe_neighbor(State = #state{passive_view = PassiveView, active_view = ActiveVi
     {_ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
       lager:warning("Trying to connect to connect to node from passive view, but passive view empty"),
-      ContactNodes = ordsets:from_list(contact_nodes()),
+      ContactNodes = ordsets:from_list(contact_nodes(State)),
       UnconnectedContactNodes = ordsets:subtract(ContactNodes, ActiveView),
       State#state{passive_view = UnconnectedContactNodes};
     %% If we have nodes in the passive view, let's try to connect to them
@@ -784,9 +784,13 @@ check_state(State = #state{passive_view = PassiveView, active_view = ActiveView,
   end,
   State.
 
-contact_nodes() ->
-  ContactNodesDict = ordsets:from_list(lashup_config:contact_nodes()),
-  ordsets:del_element(node(), ContactNodesDict).
+contact_nodes(_State = #state{extra_masters = ExtraMasters}) ->
+  contact_nodes(ExtraMasters);
+contact_nodes(ExtraMasters) ->
+  ContactNodes = ordsets:from_list(lashup_config:contact_nodes()),
+  AllMasters = ordsets:union(ContactNodes, ExtraMasters),
+  ordsets:del_element(node(), AllMasters).
+
 
 
 handle_shuffle(Shuffle = #{ttl := 0}, State) ->

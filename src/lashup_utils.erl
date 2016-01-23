@@ -73,7 +73,8 @@ get_dcos_ip() ->
 maybe_poll_for_master_nodes() ->
   IPs = inet_res:lookup("master.mesos", in, a, [], 1000),
   Nodes = [erlang_nodes(IP) || IP <- IPs],
-  FlattenedNodes = lists:flatten(Nodes),
+  NaiveNodes = [lists:flatten(io_lib:format("minuteman@~s", [inet:ntoa(IP)])) || IP <- IPs],
+  FlattenedNodes = lists:flatten(Nodes) ++ NaiveNodes,
   FlattenedNodesSet = ordsets:from_list(FlattenedNodes),
   FlattenedNodesSet.
 
