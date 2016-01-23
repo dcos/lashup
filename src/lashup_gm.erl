@@ -641,7 +641,7 @@ persist(Member, _State = #state{digraph = Digraph}) ->
       NewOutNeighbors = Member#member.active_view,
       NewOutNeighborsSet = sets:from_list(NewOutNeighbors),
       NeighborsToDeleteSet = sets:subtract(OldOutNeighborsSet, NewOutNeighborsSet),
-      NeighborsToAddSet = sets:subtract(NewOutNeighbors, OldOutNeighbors),
+      NeighborsToAddSet = sets:subtract(NewOutNeighborsSet, OldOutNeighborsSet),
       NeighborsToDelete = sets:to_list(NeighborsToDeleteSet),
       NeighborsToAdd = sets:to_list(NeighborsToAddSet),
       EdgesToDelete = lists:map(fun(X) -> dict:fetch(X, EdgeDict) end, NeighborsToDelete),
