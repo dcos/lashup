@@ -130,7 +130,8 @@ init([]) ->
   {ok, _} = timer:apply_after(60000, ?MODULE, poll_for_master_nodes, []),
   {ok, _} = timer:apply_after(120000, ?MODULE, poll_for_master_nodes, []),
 
-  {ok, _} = timer:apply_interval(30000, ?MODULE, poll_for_master_nodes, []),
+  %% Only poll every 60 minutes beyond that
+  {ok, _} = timer:apply_interval(3600 * 1000, ?MODULE, poll_for_master_nodes, []),
   {ok, #state{passive_view = contact_nodes([]), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
 
 %%--------------------------------------------------------------------
@@ -344,7 +345,7 @@ code_change(_OldVsn, State, _Extra) ->
 %% Ping every one of my neighbors at least every second
 
 reschedule_ping() ->
-  reschedule_ping(250).
+  reschedule_ping(100).
 
 reschedule_ping(Time) ->
   RandFloat = random:uniform(),

@@ -22,9 +22,8 @@
   get_digraph/0,
   multicast/1,
   set_metadata/1,
-  get_neighbor_recommendations/1,
-  reachable/1,
-  reachable/2]).
+  get_neighbor_recommendations/1
+]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -44,36 +43,13 @@
 -record(subscription, {node, pid, monitor_ref}).
 -record(state, {subscriptions = [], init_time, vclock_id, seed, active_view = [], metadata = undefined, digraph, subscribers = []}).
 
+
 %% TODO: Implement probes
 
 %%%===================================================================
 %%% API
 %%%===================================================================
--spec(reachable(IP :: inet:ip4_address(), Digraph :: digraph:graph()) -> true | false | maybe).
-reachable(IP, Digraph) ->
-  NodeIPs = ets:lookup(node_ips, IP),
-  Nodes = [Node || {_IP, Node} <- NodeIPs],
-  Reachability = [digraph:get_path(Digraph, node(), Node) =/= false || Node <- Nodes],
-  case {lists:member(true, Reachability), lists:member(false, Reachability)} of
-    _ when length(Reachability) == 0 ->
-      maybe;
-    %% We have both trues and falses
-    {true, true} ->
-      maybe;
-    %% We have no trues, and only falses
-    {false, true} ->
-      false;
-    %% We have no trues, and no falses
-    {false, false} ->
-      maybe;
-    %% We have only falses and no truths
-    {true, false} ->
-      true
-  end.
--spec(reachable(IP :: inet:ip4_address()) -> true | false | maybe).
-reachable(IP) ->
-  {ok, Digraph} = get_digraph(),
-  reachable(IP, Digraph).
+
 get_digraph() ->
   gen_server:call(?SERVER, get_digraph).
 
@@ -133,6 +109,7 @@ init([]) ->
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
   ets:new(node_ips, [bag, named_table]),
   ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}]),
+  ets:new(reachability_cache, [set, named_table, {read_concurrency, true}]),
   lashup_hyparview_events:subscribe(fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
   VClockID = {node(), erlang:phash2(random:uniform())},
   Metadata = base_metadata(),
@@ -624,7 +601,7 @@ delete_node_ips(_Member) ->
 
 
 
-persist(Member, _State = #state{digraph = Digraph}) ->
+persist(Member, State = #state{digraph = Digraph}) ->
   case ets:lookup(members, Member#member.nodekey) of
     [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
       NewIPs = maps:get(ips, Member#member.metadata, []),
@@ -657,8 +634,27 @@ persist(Member, _State = #state{digraph = Digraph}) ->
       lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NewNeighbors),
       ok
   end,
-  ets:insert(members, Member).
+  ets:insert(members, Member),
+  Components = digraph_utils:strong_components(Digraph),
+  %% Find the component I'm part of
 
+  [make_component_reachable(Component, State) || Component <- Components].
+
+make_component_reachable(Component, State) ->
+  case lists:member(node(), Component) of
+    true ->
+      [make_reachable(Node, true, State) || Node <- Component];
+    false ->
+      [make_reachable(Node, false, State) || Node <- Component]
+  end.
+
+make_reachable(ReachableNode, ReachabilityType, State) ->
+  case ets:lookup(members, nodekey(ReachableNode, State)) of
+    [_Member = #member{metadata = #{ips := IPs}}] ->
+      [ets:insert(reachability_cache, {IP, ReachabilityType}) || IP <- IPs];
+    _ ->
+      ok
+  end.
 
 base_metadata() ->
   {ok, Socket} = gen_udp:open(0),
