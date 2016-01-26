@@ -150,6 +150,9 @@ init([]) ->
   {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
   {stop, Reason :: term(), NewState :: #state{}}).
 
+handle_call({do_connect, Node}, _From, State) when is_atom(Node) ->
+  State1 = add_node_active_view(Node, State),
+  {reply, State1#state.active_view, check_state(State1)};
 handle_call(get_active_view, _From, State = #state{active_view = ActiveView}) ->
   {reply, ActiveView, State};
 handle_call(get_passive_view, _From, State = #state{passive_view = PassiveView}) ->
@@ -190,6 +193,7 @@ handle_cast(_JoinSuccess = #{message := join_success, sender := Sender, ref := R
   State3 = State2#state{joined = true},
   push_state(State3),
   {noreply, check_state(State3)};
+
 handle_cast(_Join = #{message := join, sender := Node, ref := Ref}, State) ->
   lager:debug("Saw join from ~p", [Node]),
   State1 = handle_join(Node, State, Ref),
