@@ -130,8 +130,8 @@ init([]) ->
   {ok, _} = timer:apply_after(60000, ?MODULE, poll_for_master_nodes, []),
   {ok, _} = timer:apply_after(120000, ?MODULE, poll_for_master_nodes, []),
 
-  %% Only poll every 60 minutes beyond that
-  {ok, _} = timer:apply_interval(3600 * 1000, ?MODULE, poll_for_master_nodes, []),
+  %% Only poll every 5 minutes beyond that
+  {ok, _} = timer:apply_interval(300000, ?MODULE, poll_for_master_nodes, []),
   {ok, #state{passive_view = contact_nodes([]), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
 
 %%--------------------------------------------------------------------
@@ -1019,6 +1019,13 @@ handle_maybe_disconnect(Node, State = #state{active_view = ActiveView}) ->
   end.
 
 poll_for_master_nodes() ->
+  case lashup_hyparview_membership:get_active_view() of
+    [] ->
+      really_poll_for_master_nodes();
+    _ ->
+      ok
+  end.
+really_poll_for_master_nodes() ->
   case catch lashup_utils:maybe_poll_for_master_nodes() of
     List when is_list(List) andalso length(List) > 0 ->
       gen_server:cast(?SERVER, {masters, List});
