@@ -18,7 +18,7 @@
 -define(MASTERS, [master1, master2]).
 
 all() ->
-  [hyparview_test, failure_test, failure_test2].
+  [hyparview_test, failure_test].
 
 init_per_suite(Config) ->
   {Masters, Slaves} = start_nodes(),
@@ -100,34 +100,6 @@ failure_test(Config) ->
   ct:pal("Converged in ~p milliseconds", [600000-LeftOverTime]),
   ok.
 
-
-failure_test2(Config) ->
-  ct:pal("Testing failure conditions (2)"),
-  Nodes = ?config(slaves, Config) ++ ?config(masters, Config),
-  N = round(length(Nodes) / 2),
-  {Nodes1, Nodes2} = lists:split(N, Nodes),
-  ct:pal("Splitting networks"),
-  rpc:multicall(Nodes1, net_kernel, allow, [[node()|Nodes1]]),
-  rpc:multicall(Nodes2, net_kernel, allow, [[node()|Nodes2]]),
-  lists:foreach(fun(Node) -> rpc:multicall(Nodes1, erlang, disconnect_node, [Node]) end, Nodes2),
-  lists:foreach(fun(Node) -> rpc:multicall(Nodes2, erlang, disconnect_node, [Node]) end, Nodes1),
-
-  %% This will result in partitioning the nodes
-  %% Sleep for 30 seconds
-  timer:sleep(30000),
-  rpc:multicall(Nodes, net_kernel, allow, [node()|Nodes]),
-  ct:pal("Healing networks"),
-  LeftOverTime = wait_for_convergence(600000, 5000, ?config(slaves, Config) ++ ?config(masters, Config)),
-  Paths = check_graph(?config(slaves, Config) ++ ?config(masters, Config)),
-  PathLens = [length(Path)|| {{_V1, _V2}, Path} <- Paths, Path =/= false],
-  MaxLen = lists:max(PathLens),
-  MinLen = lists:min(PathLens),
-  Mean = lists:sum(PathLens) / length(PathLens),
-  SortedPathLens = lists:sort(PathLens),
-  Median = lists:nth(round(length(PathLens) / 2), SortedPathLens),
-  ct:pal("Max Path length: ~p~nMin Path length: ~p~nMean Path length: ~p~nMedian Path Length: ~p~n", [MaxLen, MinLen, Mean, Median]),
-  ct:pal("Converged in ~p milliseconds", [600000-LeftOverTime]),
-  ok.
 
 
 
