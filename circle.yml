@@ -31,4 +31,5 @@ test:
     - mkdir -p $CIRCLE_TEST_REPORTS/
     - mv logs $CIRCLE_TEST_REPORTS
     - mv log $CIRCLE_TEST_REPORTS
+    - mv ct_run $CIRCLE_TEST_REPORTS
 
