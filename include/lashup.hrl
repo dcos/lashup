@@ -1,2 +1,14 @@
 %-record(lashup_join_message, {type, payload}).
--record(member, {nodekey, node, node_clock, vclock, locally_updated_at = [], clock_deltas = [], active_view = [], metadata = erlang:error()}).
+-record(member, {
+  nodekey :: {Key :: integer(), Node :: node()},
+  node :: Node :: node(),
+  node_clock :: integer(),
+  vclock :: riak_dt_vclock:vclock(),
+  locally_updated_at = [] :: [integer()],
+  clock_deltas = [] :: [integer()],
+  active_view = [] :: [node()],
+  metadata = erlang:error() :: map()
+}).
+
+-type member() :: #member{}.
+

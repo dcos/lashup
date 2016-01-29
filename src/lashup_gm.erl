@@ -15,12 +15,10 @@
 
 %% API
 -export([start_link/0,
-  dump_events/1,
   get_subscriptions/0,
   gm/0,
   path_to/1,
   get_digraph/0,
-  multicast/1,
   set_metadata/1,
   get_neighbor_recommendations/1
 ]).
@@ -41,7 +39,17 @@
 
 -record(subscriber, {monitor_ref, node, pid}).
 -record(subscription, {node, pid, monitor_ref}).
--record(state, {subscriptions = [], init_time, vclock_id, seed, active_view = [], metadata = undefined, digraph, subscribers = []}).
+-record(state, {
+  subscriptions = [],
+  init_time,
+  vclock_id,
+  seed,
+  active_view = [],
+  metadata = undefined,
+  digraph,
+  subscribers = []}).
+
+-type state() :: #state{}.
 
 
 %% TODO: Implement probes
@@ -59,8 +67,15 @@ path_to(Node) ->
 set_metadata(Metadata) ->
   gen_server:call(?SERVER, {set_metadata, Metadata}).
 
+%% @doc
+%% Timeout here is limited to 500 ms, and not less
+%% empirically, dumping 1000 nodes pauses lashup_gm for ~300 ms.
+%% So we bumped this up to sit above that. We should decrease it when we get a chance
+%% because lashup_hyparview_membership depends on it not pausing for a long time
+
+
 get_neighbor_recommendations(ActiveViewSize) ->
-  gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 10).
+  gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
 gm() ->
   gen_server:call(?SERVER, gm).
@@ -68,11 +83,7 @@ gm() ->
 get_subscriptions() ->
   gen_server:call(?SERVER, get_subscriptions).
 
-dump_events(Pid) ->
-  gen_server:cast(?SERVER, {dump_events, Pid}).
 
-multicast(Payload) ->
-  gen_server:cast(?SERVER, {multicast, Payload}).
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -100,7 +111,7 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(Args :: term()) ->
-  {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
+  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
   random:seed(lashup_utils:seed()),
@@ -110,12 +121,18 @@ init([]) ->
   ets:new(node_ips, [bag, named_table]),
   ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}]),
   ets:new(reachability_cache, [set, named_table, {read_concurrency, true}]),
-  lashup_hyparview_events:subscribe(fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
+  lashup_hyparview_events:subscribe(
+    fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
   VClockID = {node(), erlang:phash2(random:uniform())},
   Metadata = base_metadata(),
-  State = #state{init_time = erlang:monotonic_time(), vclock_id = VClockID, seed = lashup_utils:seed(), digraph = digraph:new(), metadata = Metadata},
+  State = #state{
+    init_time = erlang:monotonic_time(),
+    vclock_id = VClockID,
+    seed = lashup_utils:seed(),
+    digraph = digraph:new(),
+    metadata = Metadata},
   init_clock(State),
-  timer:send_interval(3600*1000, trim_nodes),
+  timer:send_interval(3600 * 1000, trim_nodes),
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -126,19 +143,18 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: #state{}) ->
-  {reply, Reply :: term(), NewState :: #state{}} |
-  {reply, Reply :: term(), NewState :: #state{}, timeout() | hibernate} |
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+  State :: state()) ->
+  {reply, Reply :: term(), NewState :: state()} |
+  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
+  {stop, Reason :: term(), NewState :: state()}).
+handle_call(components, _From, State = #state{digraph = Digraph}) ->
+  Reply = digraph_utils:strong_components(Digraph),
+  {reply, Reply, State};
 handle_call({set_metadata, Metadata}, _From, State) ->
-  BaseMetadata = base_metadata(),
-  %% Metadata can override values in BaseMetadata
-  NewMetadata = maps:merge(BaseMetadata, Metadata),
-  State1 = State#state{metadata = NewMetadata},
-  self() ! update_node,
+  State1 = handle_set_metadata(Metadata, State),
   {reply, ok, State1};
 handle_call(get_digraph, _From, State = #state{digraph = Digraph}) ->
   Reply = {ok, Digraph},
@@ -147,16 +163,11 @@ handle_call({path_to, Node}, _From, State = #state{digraph = Digraph}) ->
   Reply = digraph:get_short_path(Digraph, node(), Node),
   {reply, Reply, State};
 handle_call(gm, _From, State) ->
-  Reply = get_membership(),
-  {reply, Reply, State};
-handle_call({multicast, Payload}, _From, State) ->
-  do_multicast(Payload, State);
-handle_call({subscribe, Pid}, _From, State = #state{subscribers = Subscribers}) ->
-  MonitorRef = monitor(process, Pid),
-  Subscriber = #subscriber{node = node(Pid), monitor_ref = MonitorRef, pid = Pid},
-  State1 = State#state{subscribers = [Subscriber|Subscribers]},
-  {reply, {ok, self()}, State1};
-handle_call(get_subscriptions, _From, State = #state{subscriptions =  Subscriptions}) ->
+  {reply, get_membership(), State};
+handle_call({subscribe, Pid}, _From, State) ->
+  {Reply, State1} = handle_subscribe(Pid, State),
+  {reply, Reply, State1};
+handle_call(get_subscriptions, _From, State = #state{subscriptions = Subscriptions}) ->
   {reply, Subscriptions, State};
 handle_call(update_node, _From, State) ->
   State1 = update_node(State),
@@ -175,17 +186,16 @@ handle_call(Request, _From, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
-handle_cast({dump_events, Pid}, State) ->
-  handle_dump_events(Pid, State),
-  {noreply, State};
+-spec(handle_cast(Request :: term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 handle_cast({compressed, Data}, State) when is_binary(Data) ->
   Data1 = binary_to_term(Data),
   handle_cast(Data1, State);
-
+handle_cast({sync, Pid}, State) ->
+  handle_sync(Pid, State),
+  {noreply, State};
 handle_cast(#{message := remote_event, from := From, event := #{message := updated_node} = UpdatedNode}, State) ->
   %lager:debug("Received Updated Node: ~p", [UpdatedNode]),
   State1 = handle_updated_node(From, UpdatedNode, State),
@@ -194,6 +204,11 @@ handle_cast(#{message := remote_event, from := From, event := #{message := updat
 handle_cast(#{message := lashup_hyparview_event, event := #{type := current_views} = Event}, State) ->
   State1 = handle_current_views(Event, State),
   {noreply, State1};
+
+handle_cast(update_node, State) ->
+  State1 = update_node(State),
+  {noreply, State1};
+
 handle_cast(Request, State) ->
   lager:debug("Received unknown cast: ~p", [Request]),
   {noreply, State}.
@@ -208,10 +223,10 @@ handle_cast(Request, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_info(Info :: timeout() | term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 
 handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_reference(MonitorRef) ->
   State1 = prune_subscribers(MonitorRef, State),
@@ -220,9 +235,6 @@ handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_
 
 handle_info({nodedown, Node}, State) ->
   State1 = handle_nodedown(Node, State),
-  {noreply, State1};
-handle_info(update_node, State) ->
-  State1 = update_node(State),
   {noreply, State1};
 handle_info(trim_nodes, State) ->
   trim_nodes(State),
@@ -243,7 +255,7 @@ handle_info(Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: #state{}) -> term()).
+  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:debug("Lashup_GM terminated, because: ~p, in state: ~p", [Reason, State]),
   ok.
@@ -256,15 +268,34 @@ terminate(Reason, State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
   Extra :: term()) ->
-  {ok, NewState :: #state{}} | {error, Reason :: term()}).
+  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+handle_sync(Pid, State) ->
+  lashup_gm_sync_worker:handle(Pid, State#state.seed).
+
+-spec(handle_set_metadata(Metadata :: term(), State :: state()) -> State1 :: state()).
+handle_set_metadata(Metadata, State) ->
+  BaseMetadata = base_metadata(),
+  %% Metadata can override values in BaseMetadata
+  NewMetadata = maps:merge(BaseMetadata, Metadata),
+  State1 = State#state{metadata = NewMetadata},
+  gen_server:cast(self(), update_node),
+  State1.
+
+-spec(handle_subscribe(Pid :: pid(), State :: state()) -> {{ok, Self :: pid()}, State1 :: state()}).
+handle_subscribe(Pid, State = #state{subscribers = Subscribers}) ->
+  MonitorRef = monitor(process, Pid),
+  Subscriber = #subscriber{node = node(Pid), monitor_ref = MonitorRef, pid = Pid},
+  State1 = State#state{subscribers = [Subscriber | Subscribers]},
+  {{ok, self()}, State1}.
 
 handle_current_views(_Event = #{active_view := RemoteActiveView}, State = #state{subscriptions = Subscriptions}) ->
   Subscriptions1 = lists:foldl(fun check_member/2, Subscriptions, RemoteActiveView),
@@ -273,7 +304,7 @@ handle_current_views(_Event = #{active_view := RemoteActiveView}, State = #state
     {OldActiveView, Subscriptions1} ->
       ok;
     _ ->
-      self() ! update_node
+      gen_server:cast(self(), update_node)
   end,
   State#state{subscriptions = Subscriptions1, active_view = RemoteActiveView}.
 
@@ -285,12 +316,12 @@ check_member(Node, Subscriptions) ->
       %% We should also ensure that the node is up
       case catch lashup_gm_fanout:start_monitor(Node) of
         {ok, {Pid, Monitor}} ->
-            Subscription = #subscription{node = Node, pid = Pid, monitor_ref = Monitor},
-            lager:debug("Added handler for node: ~p", [Node]),
-            [Subscription|Subscriptions];
-          Else ->
-            lager:debug("Unable to add handler for node: ~p, error: ~p", [Node, Else]),
-            Subscriptions
+          Subscription = #subscription{node = Node, pid = Pid, monitor_ref = Monitor},
+          lager:debug("Added handler for node: ~p", [Node]),
+          [Subscription | Subscriptions];
+        Else ->
+          lager:debug("Unable to add handler for node: ~p, error: ~p", [Node, Else]),
+          Subscriptions
       end;
     _ ->
       Subscriptions
@@ -310,19 +341,22 @@ init_clock(State = #state{vclock_id = VClockID}) ->
     locally_updated_at = [LocalUpdate],
     clock_deltas = [ClockDelta],
     metadata = State#state.metadata
-    },
+  },
   persist(Member, State).
 
 nodekey(Node, _State = #state{seed = Seed}) ->
-  Hash = erlang:phash2({Node, Seed}),
-  {Hash, Node};
+  lashup_utils:nodekey(Node, Seed);
 nodekey(Node, Seed) ->
-  Hash = erlang:phash2({Node, Seed}),
-  {Hash, Node}.
+  lashup_utils:nodekey(Node, Seed).
 
-update_node(State = #state{vclock_id = VClockID, active_view = ActiveView, metadata = Metadata}) ->
+update_node(State) when is_record(State, state) ->
+  FreshVClock = riak_dt_vclock:fresh(),
+  update_node(FreshVClock, State).
+
+update_node(OldVClock, State = #state{vclock_id = VClockID, active_view = ActiveView, metadata = Metadata}) ->
   [Member] = ets:lookup(members, nodekey(node(), State)),
-  NewVClock = riak_dt_vclock:increment(VClockID, Member#member.vclock),
+  MergedClocks = riak_dt_vclock:merge([OldVClock, Member#member.vclock]),
+  NewVClock = riak_dt_vclock:increment(VClockID, MergedClocks),
   %% TODO:
   %% Adjust TTL based on maximum path length from link-state database
   Message = #{
@@ -354,7 +388,14 @@ handle_updated_node(From, UpdatedNode = #{node := Node}, State) ->
   end.
 
 store_and_forward_new_updated_node(From,
-    UpdatedNode = #{node := Node, node_clock := NodeClock, vclock := VClock, ttl := TTL, active_view := ActiveView, metadata := Metadata}, State) ->
+  UpdatedNode = #{
+    node := Node,
+    node_clock := NodeClock,
+    vclock := VClock,
+    ttl := TTL,
+    active_view := ActiveView,
+    metadata := Metadata
+  }, State) ->
   LocalUpdate = erlang:monotonic_time(),
   ClockDelta = abs(NodeClock - LocalUpdate),
   Member = #member{
@@ -372,6 +413,9 @@ store_and_forward_new_updated_node(From,
   forward(NewUpdatedNode, State),
   State.
 
+
+%% These debug statements are commented out for easy debugging enablement
+%% TODO: Probably should turn them into a macro soon
 
 maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{vclock := VClock}, State) ->
   %% Check if the remote vector clock is bigger
@@ -391,17 +435,23 @@ maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{vclock 
   end,
   State.
 
-%-record(member, {nodekey, node, node_clock, vclock, locally_updated_at = [], clock_deltas = []}).
 
-store_and_forward_updated_node(Member, From, _UpdatedNode, _State) when Member#member.node == node() andalso From =/= node() ->
+store_and_forward_updated_node(Member, From, _UpdatedNode, _State)
+    when Member#member.node == node() andalso From =/= node() ->
   ok;
 
 store_and_forward_updated_node(Member, From,
-    UpdatedNode = #{node_clock := NodeClock, vclock := VClock, ttl := TTL, active_view := ActiveView, metadata := Metadata}, State) when TTL >= 0 ->
+  UpdatedNode = #{
+    node_clock := NodeClock,
+    vclock := VClock,
+    ttl := TTL,
+    active_view := ActiveView,
+    metadata := Metadata
+  }, State) when TTL >= 0 ->
   Now = erlang:monotonic_time(),
   NewLocallyUpdatedAt = lists:sublist([Now | Member#member.locally_updated_at], 100),
   ClockDelta = abs(NodeClock - Now),
-  NewClockDelta = lists:sublist([ClockDelta|Member#member.clock_deltas], 100),
+  NewClockDelta = lists:sublist([ClockDelta | Member#member.clock_deltas], 100),
   NewMember = Member#member{
     node_clock = NodeClock,
     vclock = VClock,
@@ -430,26 +480,10 @@ drop_and_respond_updated_node(Member, From, UpdatedNode, State) ->
 %% We can't actually update the vector clock with our vector clock if we're some random node
 %% We only do the update if and only if we have the same node name as the ingress message
 
-merge_and_forward_updated_node(Member, _From, UpdatedNode = #{vclock := VClock, node := Node, ttl := TTL},
-    State = #state{vclock_id = VClockID, active_view = ActiveView, metadata = Metadata}) when Node == node() andalso TTL > 0 ->
+merge_and_forward_updated_node(_Member, _From, _UpdatedNode = #{vclock := VClock, node := Node, ttl := TTL}, State)
+    when Node == node() andalso TTL > 0 ->
   lager:warning("Saw member with duplicate node name, merging vclocks"),
-  NewVClock = riak_dt_vclock:merge([VClock, Member#member.vclock]),
-  NewVClock1 = riak_dt_vclock:increment(VClockID, NewVClock),
-  NewNodeClock = erlang:system_time(),
-  Now = erlang:monotonic_time(),
-  NewLocallyUpdatedAt = lists:sublist([Now | Member#member.locally_updated_at], 100),
-  ClockDelta = abs(NewNodeClock - Now),
-  NewClockDelta = lists:sublist([ClockDelta|Member#member.clock_deltas], 100),
-  NewMember = Member#member{
-    node_clock = NewNodeClock,
-    vclock = NewVClock1,
-    locally_updated_at = NewLocallyUpdatedAt,
-    clock_deltas = NewClockDelta,
-    metadata = Metadata
-  },
-  NewUpdatedNode = UpdatedNode#{node_clock => NewNodeClock, vclock => NewVClock1, ttl := TTL - 1, active_view => ActiveView, metadata => Metadata},
-  persist(NewMember, State),
-  forward(NewUpdatedNode, State);
+  update_node(VClock, State);
 
 %% Drop the local version completely
 merge_and_forward_updated_node(Member, From, UpdatedNode = #{ttl := TTL}, State) when TTL >= 0 ->
@@ -457,48 +491,29 @@ merge_and_forward_updated_node(Member, From, UpdatedNode = #{ttl := TTL}, State)
   %% Unless it's the member that originated the message
   case From of
     Node when Node == Member#member.node ->
-      NewUpdatedNode = UpdatedNode#{only_nodes => [Node],ttl := TTL - 1, node_clock => Member#member.node_clock, vclock => Member#member.vclock, active_view => Member#member.active_view, metadata => Member#member.metadata},
+      NewUpdatedNode = UpdatedNode#{
+        only_nodes => [Node],
+        ttl := TTL - 1,
+        node_clock => Member#member.node_clock,
+        vclock => Member#member.vclock,
+        active_view => Member#member.active_view,
+        metadata => Member#member.metadata
+      },
       forward(NewUpdatedNode, State);
     _ -> ok
   end,
   delete(Member, State).
 
 
-forward(_NewUpdatedNode = #{ttl := TTL}, _State) when TTL =< 0->
+forward(_NewUpdatedNode = #{ttl := TTL}, _State) when TTL =< 0 ->
   ok;
 forward(NewUpdatedNode, _State = #state{subscribers = Subscribers}) ->
   CompressedTerm = term_to_binary(NewUpdatedNode, [compressed]),
   Fun =
-  fun(_Subscriber = #subscriber{pid = Pid}) ->
-    erlang:send(Pid, {event, CompressedTerm}, [noconnect])
-  end,
+    fun(_Subscriber = #subscriber{pid = Pid}) ->
+      erlang:send(Pid, {event, CompressedTerm}, [noconnect])
+    end,
   lists:foreach(Fun, Subscribers).
-
-handle_dump_events(Pid, State) ->
-  Key = ets:first(members),
-  do_dump_events(Key, Pid, State).
-
-do_dump_events('$end_of_table', _Pid, _State) ->
-  ok;
-do_dump_events(Key, Pid, _State) ->
-  [Member] = ets:lookup(members, Key),
-  NewUpdatedNode = to_event(Member),
-  CompressedTerm = term_to_binary(NewUpdatedNode, [compressed]),
-  erlang:send(Pid, {event, CompressedTerm}, [noconnect]),
-  NextKey = ets:next(members, Key),
-  do_dump_events(NextKey, Pid, _State).
-
-to_event(Member = #member{}) ->
-  #{
-    message => updated_node,
-    node => Member#member.node,
-    node_clock => Member#member.node_clock,
-    vclock => Member#member.vclock,
-    ttl => 1,
-    active_view => Member#member.active_view,
-    metadata => Member#member.metadata
-  }.
-
 
 
 handle_nodedown(Node, State = #state{subscriptions = Subscriptions, subscribers = Subscribers}) ->
@@ -510,25 +525,24 @@ handle_nodedown(Node, State = #state{subscriptions = Subscriptions, subscribers 
 get_membership() ->
   ets:foldl(fun accumulate_membership/2, [], members).
 
-% -record(member, {nodekey, node, node_clock, vclock, locally_updated_at = [], clock_deltas = []}).
 
 accumulate_membership(Member, Acc) ->
   Now = erlang:monotonic_time(),
-  [LastHeard| _] = Member#member.locally_updated_at,
+  [LastHeard | _] = Member#member.locally_updated_at,
   TimeSinceLastHeard = erlang:convert_time_unit(Now - LastHeard, native, milli_seconds),
   Node = #{node => Member#member.node, time_since_last_heard => TimeSinceLastHeard, metadata => Member#member.metadata},
-  [Node|Acc].
+  [Node | Acc].
 
 trim_nodes(State) ->
   Now = erlang:monotonic_time(),
   Delta = erlang:convert_time_unit(86400, seconds, native),
   MatchSpec = ets:fun2ms(
-    fun(Member = #member{locally_updated_at = [LastHeard | _]})
-      when Now - LastHeard > Delta andalso Member#member.node =/= node()
+    fun(Member = #member{locally_updated_at = LocallyUpdatedAt})
+      when Now - hd(LocallyUpdatedAt) > Delta andalso Member#member.node =/= node()
       -> Member
     end
   ),
-  Members =  ets:select(members, MatchSpec),
+  Members = ets:select(members, MatchSpec),
   lists:foreach(fun(X) -> delete(X, State) end, Members).
 
 update_node_backoff_loop(Delay, Pid) ->
@@ -544,10 +558,16 @@ prune_subscriptions(MonitorRef, State = #state{subscriptions = Subscription}) ->
   Subscription1 = lists:keydelete(MonitorRef, #subscription.monitor_ref, Subscription),
   State#state{subscriptions = Subscription1}.
 
-%handle_multicast(Message, State = #state{digraph = Digraph}) ->
 
+%% @doc
+%% This function (at the moment) only triggers for the purposes to hint back to hyparview membership
+%% for aggressive probes
+%% Effectively, it means that we have observed another node evict one of our active neighbors from its active set
+%% Therefore, we are going to check if it's a dirty liar, or not.
+%% it's less new member, but more a change in another member
 
-%% This function (at the moment) only triggers for the purposes to hint back to hyparview membership for aggressive probes
+%% @end
+-spec(process_new_member(MemberOld :: member(), MemberNew :: member(), State :: state()) -> ok).
 process_new_member(Member, NewMember, _State = #state{active_view = HyparViewActiveView}) ->
   ActiveView1 = Member#member.active_view,
   ActiveView2 = NewMember#member.active_view,
@@ -556,12 +576,8 @@ process_new_member(Member, NewMember, _State = #state{active_view = HyparViewAct
   RetiredMembersSet = ordsets:subtract(ActiveView1Set, ActiveView2Set),
   HyparViewActiveViewSet = ordsets:from_list(HyparViewActiveView),
   ProbeNodes = ordsets:intersection(RetiredMembersSet, HyparViewActiveViewSet),
-  lists:foreach(fun(ProbeNode) -> gen_server:cast(lashup_hyparview_membership, {probe, ProbeNode}) end, ProbeNodes).
-
-do_multicast(_Payload, _State) ->
-  %#{message => multicast, ttl => 20, payload => Payload}
+  [lashup_hyparview_ping_handler:ping(ProbeNode) || ProbeNode <- ProbeNodes],
   ok.
- % Message = #{message => multicast, from => node(), payload => Payload},
 
 handle_get_neighbor_recommendations(ActiveViewSize) ->
   %% We don't have to do any randomization on the table to avoid colliding joins
@@ -601,6 +617,9 @@ delete_node_ips(_Member) ->
 
 
 
+%% TODO:
+%% Rewrite both
+-spec(persist(Member :: member(), State :: state()) -> ok).
 persist(Member, State = #state{digraph = Digraph}) ->
   case ets:lookup(members, Member#member.nodekey) of
     [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
@@ -610,35 +629,60 @@ persist(Member, State = #state{digraph = Digraph}) ->
       lists:foreach(fun(IP) -> ets:delete(node_ips, {IP, Member#member.node}) end, IPsToRemove),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),
-      OldOutEdges = digraph:out_edges(Digraph, Member#member.node),
-      OldOutEdgesPlusVertexes = [ digraph:edge(Digraph, Edge) || Edge <- OldOutEdges],
-      EdgeDict = dict:from_list([{V2, E} || {E, _V1, V2, _Label} <- OldOutEdgesPlusVertexes]),
-
-      OldOutNeighbors = digraph:out_neighbours(Digraph, Member#member.node),
-      OldOutNeighborsSet = sets:from_list(OldOutNeighbors),
-      NewOutNeighbors = Member#member.active_view,
-      NewOutNeighborsSet = sets:from_list(NewOutNeighbors),
-      NeighborsToDeleteSet = sets:subtract(OldOutNeighborsSet, NewOutNeighborsSet),
-      NeighborsToAddSet = sets:subtract(NewOutNeighborsSet, OldOutNeighborsSet),
-      NeighborsToDelete = sets:to_list(NeighborsToDeleteSet),
-      NeighborsToAdd = sets:to_list(NeighborsToAddSet),
-      EdgesToDelete = lists:map(fun(X) -> dict:fetch(X, EdgeDict) end, NeighborsToDelete),
-      digraph:del_edges(Digraph, EdgesToDelete),
-      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NeighborsToAdd);
+      persist_digraph_update_member(Member, State);
     [] ->
       IPsToAdd = maps:get(ips, Member#member.metadata, []),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),
       digraph:add_vertex(Digraph, Member#member.node),
       NewNeighbors = Member#member.active_view,
-      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end, NewNeighbors),
+      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end,
+        NewNeighbors),
       ok
   end,
   ets:insert(members, Member),
   Components = digraph_utils:strong_components(Digraph),
   %% Find the component I'm part of
+  [make_component_reachable(Component, State) || Component <- Components],
+  ok.
 
-  [make_component_reachable(Component, State) || Component <- Components].
+-spec(persist_digraph_update_member(Member :: member(), State :: state()) -> ok).
+persist_digraph_update_member(Member, _State = #state{digraph = Digraph}) ->
+  OldOutEdges = digraph:out_edges(Digraph, Member#member.node),
+  OldOutEdgesPlusVertexes = [digraph:edge(Digraph, Edge) || Edge <- OldOutEdges],
+  EdgeDict = dict:from_list([{V2, E} || {E, _V1, V2, _Label} <- OldOutEdgesPlusVertexes]),
+  OldOutNeighbors = digraph:out_neighbours(Digraph, Member#member.node),
+  NewOutNeighbors = Member#member.active_view,
+  {NeighborsToAdd, NeighborsToDelete} = neighbor_modifications(OldOutNeighbors, NewOutNeighbors),
+  EdgesToDelete = lists:map(fun(X) -> dict:fetch(X, EdgeDict) end, NeighborsToDelete),
+  digraph:del_edges(Digraph, EdgesToDelete),
+  %% We need to add the vertex in case we haven't seen the node before
+  %% or we locally purged it
+  AddEdgeFun = fun(X) ->
+    digraph:add_vertex(Digraph, X),
+    digraph:add_edge(Digraph, Member#member.node, X)
+               end,
+  [AddEdgeFun(X) || X <- NeighborsToAdd],
+  ok.
+
+
+-spec(neighbor_modifications(OldOutNeighbors :: [node()], NewOutNeighbors :: [node()]) ->
+  {NeighborsToAdd :: ordsets:ordset(node()), NeighborsToDelete :: ordsets:ordset(node())}).
+neighbor_modifications(OldOutNeighbors, NewOutNeighbors) ->
+  OldOutNeighborsSet = ordsets:from_list(OldOutNeighbors),
+  NewOutNeighborsSet = ordsets:from_list(NewOutNeighbors),
+  neighbor_modifications1(OldOutNeighborsSet, NewOutNeighborsSet).
+
+-spec(neighbor_modifications1(OldOutNeighbors :: ordsets:ordset(node()),
+  NewOutNeighbors :: ordsets:ordset(node())) ->
+  {NeighborsToAdd :: ordsets:ordset(node()), NeighborsToDelete :: ordsets:ordset(node())}).
+neighbor_modifications1(OldOutNeighborsSet, NewOutNeighborsSet) ->
+  NeighborsToDeleteSet = ordsets:subtract(OldOutNeighborsSet, NewOutNeighborsSet),
+  NeighborsToAddSet = ordsets:subtract(NewOutNeighborsSet, OldOutNeighborsSet),
+  {NeighborsToAddSet, NeighborsToDeleteSet}.
+
+
+
 
 make_component_reachable(Component, State) ->
   case lists:member(node(), Component) of
@@ -661,7 +705,7 @@ base_metadata() ->
   IPAddress =
     case inet:gethostbyname("leader.mesos") of
       {ok, Hostent} ->
-        [Addr|_] = Hostent#hostent.h_addr_list,
+        [Addr | _] = Hostent#hostent.h_addr_list,
         Addr;
       _ ->
         {192, 88, 99, 0}

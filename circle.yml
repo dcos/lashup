@@ -1,4 +1,6 @@
 machine:
+  pre:
+    - echo "127.0.0.1 $(uname -n|cut -f1 -d.) $(uname -n) localhost" | sudo tee /etc/hosts
   environment:
     PATH: ${HOME}/extras/bin:${HOME}/extras/otp/18.1/bin:${PATH}
 dependencies:
@@ -12,19 +14,20 @@ dependencies:
     - if [ ! -d ~/extras/otp/18.1 ]; then ./kerl build 18.1 18.1; ./kerl install 18.1 ~/extras/otp/18.1; fi
   override:
     - ./rebar get-deps
-    - ./rebar build-plt
+    - ./rebar check-plt
 
 test:
   override:
     - ./rebar compile
-    - ./rebar ct
-    - dialyzer --plt .rebar/minuteman_18.1_plt --add_to_plt ebin/ --verbose
+    - ./rebar ct -v
+    - ./rebar check-plt
     - ./rebar xref
     - ./rebar dialyze
     - ./elvis rock
+    - ./rebar doc
   post:
     - mkdir -p $CIRCLE_TEST_REPORTS/
     - mv logs $CIRCLE_TEST_REPORTS
-    - mv log $CIRCLE_TEST_REPORTS
-    - mv ct_run $CIRCLE_TEST_REPORTS
+    - mkdir -p $CIRCLE_ARTIFACTS
+    - mv doc $CIRCLE_ARTIFACTS
 

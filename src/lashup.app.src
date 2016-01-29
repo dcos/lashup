@@ -6,7 +6,8 @@
   {applications, [
                   kernel,
                   stdlib,
-                  lager
+                  lager,
+                  riak_dt
                  ]},
   {mod, { lashup_app, []}},
   {env, []}

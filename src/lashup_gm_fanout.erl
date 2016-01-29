@@ -17,6 +17,9 @@
 
 %% The actual fan-out is handled by lashup_gm
 
+-include_lib("stdlib/include/ms_transform.hrl").
+-include("lashup.hrl").
+
 %% API
 -export([start_monitor/1, init/1]).
 -record(state, {parent, receiver, receiver_mon, parent_mon, node}).
@@ -40,7 +43,7 @@ init(State = #state{receiver = Receiver, node = Node}) when node() == node(Recei
       ParentMon = monitor(process, Parent),
       %% TODO: Implement dump_events in here
       %% Just access the ets table directly
-      gen_server:cast({lashup_gm, Node}, {dump_events, self()}),
+      gen_server:cast({lashup_gm, Node}, {sync, self()}),
       State1 = State#state{receiver_mon = ReceiverMon, parent_mon = ParentMon, parent = Parent},
       event_loop(State1);
     Else ->
@@ -51,6 +54,8 @@ init(State = #state{receiver = Receiver, node = Node}) when node() == node(Recei
 event_loop(State) ->
   State1 =
   receive
+    #{type := aae_keys} = AAEKeys ->
+      aae_keys(AAEKeys, State);
     {event, Event} ->
       forward_event(Event, State);
     {'DOWN', MonitorRef, _Type, _Object, Info} when MonitorRef == State#state.parent_mon ->
@@ -68,3 +73,23 @@ forward_event(Event, State = #state{receiver = Receiver}) ->
   % I'm on the same node as the receiver
   gen_server:cast(Receiver, #{message => remote_event, from => State#state.node, event => Event}),
   State.
+
+%% AAE Keys is the initial sync process
+%% We have to send out full list of [{Node, VClock}] list to this pid
+%% In return it filters the one that it has newer vclocks for
+%% And sends them back
+aae_keys(#{pid := Pid}, State) ->
+  NodeClocks = node_clocks(),
+  [Pid ! #{type => node_clock, node_clock => NodeClock} || NodeClock <- NodeClocks],
+  Pid ! #{type => node_clock_complete},
+  State.
+
+-spec(node_clocks() -> [{node(), riak_dt_vclock:vclock()}]).
+node_clocks() ->
+  MatchSpec = ets:fun2ms(
+    fun(Member) ->
+      {Member#member.node, Member#member.vclock}
+    end
+  ),
+  NodeClocks = ets:select(members, MatchSpec),
+  orddict:from_list(NodeClocks).
