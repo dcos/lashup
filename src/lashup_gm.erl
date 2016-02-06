@@ -18,7 +18,6 @@
   get_subscriptions/0,
   gm/0,
   path_to/1,
-  get_digraph/0,
   set_metadata/1,
   get_neighbor_recommendations/1
 ]).
@@ -46,7 +45,6 @@
   seed,
   active_view = [],
   metadata = undefined,
-  digraph,
   subscribers = []}).
 
 -type state() :: #state{}.
@@ -57,9 +55,6 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
-
-get_digraph() ->
-  gen_server:call(?SERVER, get_digraph).
 
 path_to(Node) ->
   gen_server:call(?SERVER, {path_to, Node}).
@@ -120,7 +115,6 @@ init([]) ->
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
   ets:new(node_ips, [bag, named_table]),
   ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}]),
-  ets:new(reachability_cache, [set, named_table, {read_concurrency, true}]),
   lashup_hyparview_events:subscribe(
     fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
   VClockID = {node(), erlang:phash2(random:uniform())},
@@ -129,7 +123,6 @@ init([]) ->
     init_time = erlang:monotonic_time(),
     vclock_id = VClockID,
     seed = lashup_utils:seed(),
-    digraph = digraph:new(),
     metadata = Metadata},
   init_clock(State),
   timer:send_interval(3600 * 1000, trim_nodes),
@@ -150,18 +143,9 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
-handle_call(components, _From, State = #state{digraph = Digraph}) ->
-  Reply = digraph_utils:strong_components(Digraph),
-  {reply, Reply, State};
 handle_call({set_metadata, Metadata}, _From, State) ->
   State1 = handle_set_metadata(Metadata, State),
   {reply, ok, State1};
-handle_call(get_digraph, _From, State = #state{digraph = Digraph}) ->
-  Reply = {ok, Digraph},
-  {reply, Reply, State};
-handle_call({path_to, Node}, _From, State = #state{digraph = Digraph}) ->
-  Reply = digraph:get_short_path(Digraph, node(), Node),
-  {reply, Reply, State};
 handle_call(gm, _From, State) ->
   {reply, get_membership(), State};
 handle_call({subscribe, Pid}, _From, State) ->
@@ -599,11 +583,11 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
   end.
 
 %% ETS write functions
-delete(Member = #member{}, _State = #state{digraph = Digraph}) ->
+delete(Member = #member{}, _State) ->
+  lashup_gm_route:delete_node(Member#member.node),
   case ets:lookup(members, Member#member.nodekey) of
     [Member] ->
       delete_node_ips(Member),
-      digraph:del_vertex(Digraph, Member#member.node),
       ets:delete(members, Member#member.nodekey),
       ok;
     [] ->
@@ -620,7 +604,8 @@ delete_node_ips(_Member) ->
 %% TODO:
 %% Rewrite both
 -spec(persist(Member :: member(), State :: state()) -> ok).
-persist(Member, State = #state{digraph = Digraph}) ->
+persist(Member, _State) ->
+  lashup_gm_route:update_node(Member#member.node, Member#member.active_view),
   case ets:lookup(members, Member#member.nodekey) of
     [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
       NewIPs = maps:get(ips, Member#member.metadata, []),
@@ -628,77 +613,19 @@ persist(Member, State = #state{digraph = Digraph}) ->
       IPsToAdd = NewIPs -- OldIPs,
       lists:foreach(fun(IP) -> ets:delete(node_ips, {IP, Member#member.node}) end, IPsToRemove),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
-      ets:insert(node_ips, RecordsToAdd),
-      persist_digraph_update_member(Member, State);
+      ets:insert(node_ips, RecordsToAdd);
     [] ->
       IPsToAdd = maps:get(ips, Member#member.metadata, []),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),
-      digraph:add_vertex(Digraph, Member#member.node),
-      NewNeighbors = Member#member.active_view,
-      lists:foreach(fun(X) -> digraph:add_vertex(Digraph, X), digraph:add_edge(Digraph, Member#member.node, X) end,
-        NewNeighbors),
       ok
   end,
   ets:insert(members, Member),
-  Components = digraph_utils:strong_components(Digraph),
   %% Find the component I'm part of
-  [make_component_reachable(Component, State) || Component <- Components],
-  ok.
-
--spec(persist_digraph_update_member(Member :: member(), State :: state()) -> ok).
-persist_digraph_update_member(Member, _State = #state{digraph = Digraph}) ->
-  OldOutEdges = digraph:out_edges(Digraph, Member#member.node),
-  OldOutEdgesPlusVertexes = [digraph:edge(Digraph, Edge) || Edge <- OldOutEdges],
-  EdgeDict = dict:from_list([{V2, E} || {E, _V1, V2, _Label} <- OldOutEdgesPlusVertexes]),
-  OldOutNeighbors = digraph:out_neighbours(Digraph, Member#member.node),
-  NewOutNeighbors = Member#member.active_view,
-  {NeighborsToAdd, NeighborsToDelete} = neighbor_modifications(OldOutNeighbors, NewOutNeighbors),
-  EdgesToDelete = lists:map(fun(X) -> dict:fetch(X, EdgeDict) end, NeighborsToDelete),
-  digraph:del_edges(Digraph, EdgesToDelete),
-  %% We need to add the vertex in case we haven't seen the node before
-  %% or we locally purged it
-  AddEdgeFun = fun(X) ->
-    digraph:add_vertex(Digraph, X),
-    digraph:add_edge(Digraph, Member#member.node, X)
-               end,
-  [AddEdgeFun(X) || X <- NeighborsToAdd],
   ok.
 
 
--spec(neighbor_modifications(OldOutNeighbors :: [node()], NewOutNeighbors :: [node()]) ->
-  {NeighborsToAdd :: ordsets:ordset(node()), NeighborsToDelete :: ordsets:ordset(node())}).
-neighbor_modifications(OldOutNeighbors, NewOutNeighbors) ->
-  OldOutNeighborsSet = ordsets:from_list(OldOutNeighbors),
-  NewOutNeighborsSet = ordsets:from_list(NewOutNeighbors),
-  neighbor_modifications1(OldOutNeighborsSet, NewOutNeighborsSet).
 
--spec(neighbor_modifications1(OldOutNeighbors :: ordsets:ordset(node()),
-  NewOutNeighbors :: ordsets:ordset(node())) ->
-  {NeighborsToAdd :: ordsets:ordset(node()), NeighborsToDelete :: ordsets:ordset(node())}).
-neighbor_modifications1(OldOutNeighborsSet, NewOutNeighborsSet) ->
-  NeighborsToDeleteSet = ordsets:subtract(OldOutNeighborsSet, NewOutNeighborsSet),
-  NeighborsToAddSet = ordsets:subtract(NewOutNeighborsSet, OldOutNeighborsSet),
-  {NeighborsToAddSet, NeighborsToDeleteSet}.
-
-
-
-
-make_component_reachable(Component, State) ->
-  case lists:member(node(), Component) of
-    true ->
-      [make_reachable(Node, true, State) || Node <- Component];
-    false ->
-      [make_reachable(Node, false, State) || Node <- Component]
-  end.
-
-make_reachable(ReachableNode, ReachabilityType, State) ->
-  case ets:lookup(members, nodekey(ReachableNode, State)) of
-    [_Member = #member{metadata = #{ips := IPs}}] ->
-      [ets:insert(reachability_cache, {IP, ReachabilityType}) || IP <- IPs];
-    _ ->
-      ok
-  end.
 
 base_metadata() ->
   {ok, Socket} = gen_udp:open(0),

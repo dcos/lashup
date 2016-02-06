@@ -39,8 +39,8 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {digraph :: digraph:digraph()}).
-
+-record(state, {}).
+-type state() :: #state{}.
 
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
@@ -64,12 +64,11 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(Args :: term()) ->
-  {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
+  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
   random:seed(lashup_utils:seed()),
-  {ok, Digraph} = lashup_gm:get_digraph(),
-  State = #state{digraph = Digraph},
+  State = #state{},
   schedule_next_probe(),
   {ok, State}.
 
@@ -81,13 +80,13 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: #state{}) ->
-  {reply, Reply :: term(), NewState :: #state{}} |
-  {reply, Reply :: term(), NewState :: #state{}, timeout() | hibernate} |
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+  State :: state()) ->
+  {reply, Reply :: term(), NewState :: state()} |
+  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
+  {stop, Reason :: term(), NewState :: state()}).
 
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -99,10 +98,10 @@ handle_call(_Request, _From, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_cast(Request :: term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 
 handle_cast(_Request, State) ->
   {noreply, State}.
@@ -117,13 +116,13 @@ handle_cast(_Request, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_info(Info :: timeout() | term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 
 handle_info(do_probe, State) ->
-  do_probe(State),
+  maybe_do_probe(State),
   {noreply, State};
 handle_info(_Info, State) ->
   {noreply, State}.
@@ -140,7 +139,7 @@ handle_info(_Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: #state{}) -> term()).
+  State :: state()) -> term()).
 terminate(_Reason, _State) ->
   ok.
 
@@ -152,9 +151,9 @@ terminate(_Reason, _State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
   Extra :: term()) ->
-  {ok, NewState :: #state{}} | {error, Reason :: term()}).
+  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
@@ -191,27 +190,37 @@ determine_next_probe(ReachableNodes, UnreachableNode) ->
   Interval1 = min(Interval, FullProbePeriod),
   trunc(Interval1).
 
--spec(do_probe(#state{}) -> ok).
-do_probe(_State = #state{digraph = Digraph}) ->
-  StrongComponents = digraph_utils:strong_components(Digraph),
-  Node = node(),
-  Pred = fun(Component) -> lists:member(Node, Component) end,
-  {[ReachableNodes], OtherComponents} = lists:partition(Pred, StrongComponents),
-  OtherComponents1 = lists:flatten(OtherComponents),
-  case OtherComponents1 of
+-spec(maybe_do_probe(state()) -> ok).
+maybe_do_probe(_State) ->
+  case lashup_gm_route:get_tree(node()) of
+    {tree, Tree} ->
+      do_probe(Tree);
+    false ->
+      lager:warning("Lashup GM Probe unable to get LSA Tree"),
+      schedule_next_probe(),
+      ok
+  end.
+
+-spec(do_probe(lashup_gm_route:tree()) -> ok).
+do_probe(Tree) ->
+   case lashup_gm_route:unreachable_nodes(Tree) of
     [] ->
       schedule_next_probe(),
       ok;
-    _ ->
-      Idx = random:uniform(length(OtherComponents1)),
-      OtherNode = lists:nth(Idx, OtherComponents1),
-      lashup_hyparview_membership:recommend_neighbor(OtherNode),
-      ProbeTime = determine_next_probe(ReachableNodes, OtherComponents1),
+    UnreachableNodes ->
+      probe_oneof(UnreachableNodes),
+      ReachableNodes = lashup_gm_route:reachable_nodes(Tree),
+      ProbeTime = determine_next_probe(ReachableNodes, UnreachableNodes),
       schedule_next_probe(ProbeTime),
       ok
   end.
 
-
+-spec(probe_oneof(UnreachableNodes :: [node()]) -> ok).
+probe_oneof(UnreachableNodes) ->
+  Idx = random:uniform(length(UnreachableNodes)),
+  OtherNode = lists:nth(Idx, UnreachableNodes),
+  lashup_hyparview_membership:recommend_neighbor(OtherNode),
+  ok.
 
 
 
