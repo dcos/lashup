@@ -236,6 +236,9 @@ handle_call({update_node, Node, Dsts}, _From, State) ->
 handle_call({get_tree, Root}, _From, State) ->
   Reply = handle_get_tree(Root, State),
   {reply, Reply, State};
+handle_call({delete_node, Node}, _From, State) ->
+  State1 = handle_delete_node(Node, State),
+  {reply, ok, State1};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
@@ -342,9 +345,13 @@ handle_update_node(Node, Dsts, State) ->
       update_local_tree(State)
   end.
 
+-spec(handle_delete_node(Node ::node(), State :: state()) -> state()).
 handle_delete_node(Node, State) ->
   ets:delete(vertices, Node),
-  ets:delete(edges, Node),
+  MatchSpec1 = ets:fun2ms(fun(#edge{dst = Dst}) when Dst == Node -> true end),
+  ets:select_delete(edges, MatchSpec1),
+  MatchSpec2 = ets:fun2ms(fun(#edge{src = Src}) when Src == Node -> true end),
+  ets:select_delete(edges, MatchSpec2),
   update_local_tree(State).
 
 update_local_tree(State) ->
@@ -486,7 +493,6 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
 
 -ifdef(TEST).
 -compile(export_all).
--record(test_state, {nodes, active_views}).
 
 proper_test_() ->
   {timeout,
@@ -495,11 +501,10 @@ proper_test_() ->
   }.
 
 proper() ->
-  [] = proper:module(?MODULE, [{numtests, 10000}]),
-  throw(i).
+  [] = proper:module(?MODULE, [{numtests, 10000}]).
 
 initial_state() ->
-  #test_state{active_views = orddict:new()}.
+  #{active_views => orddict:new()}.
 
 
 -define(NODES, [node(), node1@localhost, node2@localhost, node3@localhost,
@@ -514,8 +519,6 @@ initial_state() ->
 
 precondition(_State, _Call) -> true.
 
-
-
 postcondition(State, {call, ?MODULE, reachable, [Node]}, Result) ->
   case check_route(State, node(), Node) of
     false ->
@@ -525,14 +528,21 @@ postcondition(State, {call, ?MODULE, reachable, [Node]}, Result) ->
   end;
 postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) ->
   is_list(Result) == is_list(check_route(State, FromNode, ToNode));
+
 postcondition(_State, _Call, _Result) -> true.
 
 
-next_state(State, _V,
+next_state(State = #{active_views := AVs}, _V,
     {call, gen_server, call, [lashup_gm_route, {update_node, Node, NewNodes}]}) ->
-  AVs = State#test_state.active_views,
   AVs1 = orddict:store(Node, NewNodes, AVs),
-  State#test_state{active_views = AVs1};
+  State#{active_views => AVs1};
+
+next_state(State = #{active_views := AVs}, _V,
+  {call, gen_server, call, [lashup_gm_route, {delete_node, Node}]}) ->
+  AVs1 = orddict:erase(Node, AVs),
+  AVs2 = orddict:map(fun(_, Dsts) -> [Dst|| Dst <- Dsts, Dst =/= Node] end, AVs1),
+  State#{active_views => AVs2};
+
 next_state(State, _V, _Call) ->
   State.
 
@@ -556,13 +566,13 @@ verify_routes(FromNode, ToNode) ->
 
 check_route(_, FromNode, ToNode) when FromNode == ToNode ->
   true;
-check_route(State, FromNode, ToNode) ->
+check_route(_State = #{active_views := AVs}, FromNode, ToNode) ->
   Digraph = digraph:new(),
-  [digraph:add_vertex(Digraph, K) || {K, _V} <- State#test_state.active_views],
-  ExtraVs = lists:flatten([V || {_K, V} <- State#test_state.active_views]),
+  [digraph:add_vertex(Digraph, K) || {K, _V} <- AVs],
+  ExtraVs = lists:flatten([V || {_K, V} <- AVs]),
   [digraph:add_vertex(Digraph, V) || V <- ExtraVs],
   AddEdgeFun = fun(Src, Dsts) -> [digraph:add_edge(Digraph, Src, Dst) || Dst <- Dsts] end,
-  [AddEdgeFun(K, V) || {K, V} <- State#test_state.active_views],
+  [AddEdgeFun(K, V) || {K, V} <- AVs],
   Result = digraph:get_path(Digraph, FromNode, ToNode),
   digraph:delete(Digraph),
   Result.
@@ -570,6 +580,7 @@ check_route(State, FromNode, ToNode) ->
 command(_S) ->
   oneof([
       {call, gen_server, call, [?MODULE, {update_node, node_gen(), node_gen_list()}]},
+      {call, gen_server, call, [?MODULE, {delete_node, node_gen()}]},
       {call, ?MODULE, reachable, [node_gen()]},
       {call, ?MODULE, verify_routes, [node_gen(), node_gen()]}
     ]).
