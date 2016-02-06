@@ -20,6 +20,7 @@ test:
   override:
     - ./rebar compile
     - ./rebar ct -v
+    - ./rebar eu
     - ./rebar check-plt
     - ./rebar xref
     - ./rebar dialyze
