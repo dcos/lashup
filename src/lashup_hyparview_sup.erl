@@ -36,9 +36,6 @@ init([]) ->
     ?CHILD(lashup_hyparview_events, worker),
     ?CHILD(lashup_hyparview_ping_handler, worker),
     ?CHILD(lashup_hyparview_membership, worker),
-    ?CHILD(lashup_gm_mc, worker),
-    ?CHILD(lashup_gm_worker_sup, supervisor),
-    ?CHILD(lashup_gm, worker),
-    ?CHILD(lashup_gm_probe, worker)
+    ?CHILD(lashup_gm_sup, supervisor)
   ]} }.
 

@@ -327,20 +327,20 @@ handle_get_tree(Root, State) ->
 -spec(handle_update_node(Node :: node(), Edges :: [node()], State :: state()) -> state()).
 handle_update_node(Node, Dsts, State) ->
   Dsts1 = lists:usort(Dsts),
-  %InitialNeighbors = neighbors(Node),
+  InitialNeighbors = neighbors(Node),
   persist_node(Node),
   % Ensure that the dsts exist
   [persist_node(Dst) || Dst <- Dsts1],
   update_edges(Node, Dsts1),
-  update_local_tree(State).
-%  case Dsts of
-%    InitialNeighbors ->
-%      lager:debug("Cache relaxed"),
-%      State;
-%    _ ->
-%      lager:debug("Cache busted"),
-%      update_local_tree(State)
-%  end.
+  %% We only bust the caches is the adjacency list has changed.
+  %% Once we have properties on adjacencies and vertices,
+  %% We have to augment this
+  case Dsts of
+    InitialNeighbors ->
+      State;
+    _ ->
+      update_local_tree(State)
+  end.
 
 handle_delete_node(Node, State) ->
   ets:delete(vertices, Node),
@@ -393,7 +393,6 @@ fetch_tree_from_cache(Node) when Node == node()->
     [TreeCache] ->
       {tree, TreeCache#tree_cache.tree};
     [] ->
-      lager:warning("Cache miss for self"),
       false
   end;
 fetch_tree_from_cache(Node) ->
@@ -418,13 +417,13 @@ fetch_tree_from_cache(Node, _State = #state{cache_version = CacheVersion}) ->
       false
   end.
 
-maybe_build_and_cache_tree(Node, _State = #state{cache_version = _CacheVersion}) ->
+maybe_build_and_cache_tree(Node, _State = #state{cache_version = CacheVersion}) ->
   case ets:lookup(vertices, Node) of
     [] ->
       false;
     _ ->
       Tree = build_tree(Node),
-      %ets:insert(tree_cache, #tree_cache{cache_ver = CacheVersion, root = Node, tree = Tree}),
+      ets:insert(tree_cache, #tree_cache{cache_ver = CacheVersion, root = Node, tree = Tree}),
       {tree, Tree}
   end.
 
@@ -496,22 +495,22 @@ proper_test_() ->
   }.
 
 proper() ->
-  [] = proper:module(?MODULE, [{numtests, 2000}]),
+  [] = proper:module(?MODULE, [{numtests, 10000}]),
   throw(i).
 
 initial_state() ->
   #test_state{active_views = orddict:new()}.
 
 
--define(NODES, [node(), node1@localhost,node2@localhost,node3@localhost,
-    node4@localhost,node5@localhost,node6@localhost,
-    node7@localhost,node8@localhost,node9@localhost,
-    node10@localhost,node11@localhost,node12@localhost,
-    node13@localhost,node14@localhost,node15@localhost,
-    node16@localhost,node17@localhost,node18@localhost,
-    node19@localhost,node20@localhost,node21@localhost,
-    node22@localhost,node23@localhost,node24@localhost,
-    node25@localhost]).
+-define(NODES, [node(), node1@localhost, node2@localhost, node3@localhost,
+  node4@localhost, node5@localhost, node6@localhost,
+  node7@localhost, node8@localhost, node9@localhost,
+  node10@localhost, node11@localhost, node12@localhost,
+  node13@localhost, node14@localhost, node15@localhost,
+  node16@localhost, node17@localhost, node18@localhost,
+  node19@localhost, node20@localhost, node21@localhost,
+  node22@localhost, node23@localhost, node24@localhost,
+  node25@localhost]).
 
 precondition(_State, _Call) -> true.
 
@@ -563,7 +562,7 @@ check_route(State, FromNode, ToNode) ->
   ExtraVs = lists:flatten([V || {_K, V} <- State#test_state.active_views]),
   [digraph:add_vertex(Digraph, V) || V <- ExtraVs],
   AddEdgeFun = fun(Src, Dsts) -> [digraph:add_edge(Digraph, Src, Dst) || Dst <- Dsts] end,
-  [AddEdgeFun(K,V) || {K, V} <- State#test_state.active_views],
+  [AddEdgeFun(K, V) || {K, V} <- State#test_state.active_views],
   Result = digraph:get_path(Digraph, FromNode, ToNode),
   digraph:delete(Digraph),
   Result.

@@ -41,9 +41,9 @@
 
 -define(MAX_PING_MS, 1000).
 
-%% This is effectively how much we expect the RTT to jump
-%% 5X the highest measured RTT over the past minute, or 100 pings, whichever is smaller
--define(HEADROOM, 5).
+%% LOG_BASE calculated by taking
+%% log(?MAX_PING_MS) / ?LOG_BASE ~= ?MAX_PING_MS
+-define(LOG_BASE, 1.007).
 
 
 %% Given how the failure detector is tuned today, we might do 100 pings to a given node in
@@ -269,10 +269,8 @@ record_pong(_PongMessage = #{receiving_node := ReceivingNode, now := SendTime},
       RecordedTimes2 = [Entry || Entry = {RecordedTime, _} <- RecordedTimes1, RecordedTime > RetentionTime],
       [{Now, RTT}|RecordedTimes2]
     end,
-  %% We record the MAX_PING_MS (over headroom) so we can get a baseline over a minute
 
-  BaseLine = {Now, trunc(?MAX_PING_MS / ?HEADROOM)},
-  Initial = [{erlang:monotonic_time(), RTT}, BaseLine],
+  Initial = [{erlang:monotonic_time(), RTT}],
   PingTimes1 = dict:update(ReceivingNode, UpdateFun, Initial, PingTimes),
   State#state{ping_times = PingTimes1}.
 
@@ -303,8 +301,10 @@ determine_ping_time2(RecordedTimes) ->
       RTTs = [RTT || {_, RTT} <- RecordedTimes2],
       MaxRTT = lists:max(RTTs),
       MaxRTTMS = erlang:convert_time_unit(trunc(MaxRTT), native, milli_seconds),
-      MaxRTTMSBound = (1 + MaxRTTMS) * ?HEADROOM,
-      MaxRTTMSBound1 = min(MaxRTTMSBound, ?MAX_PING_MS),
+
+      %% Any ping below 10ms is too "noisey" to matter
+      MaxRTTMSBound = math:log(min(10, MaxRTTMS)) / math:log(?LOG_BASE),
+      MaxRTTMSBound1 = trunc(min(MaxRTTMSBound, ?MAX_PING_MS)),
       {MaxRTTMSBound1, RecordedTimes2}
   end.
 

@@ -30,6 +30,11 @@ init_per_testcase(TestCaseName, Config) ->
   {Masters, Slaves} = start_nodes(),
   [{masters, Masters}, {slaves, Slaves} | Config].
 
+
+end_per_testcase(ping_test, _Config) ->
+  os:cmd("pkill -CONT -f beam.smp"),
+  stop_nodes(slaves()),
+  stop_nodes(masters());
 end_per_testcase(_, _Config) ->
   stop_nodes(slaves()),
   stop_nodes(masters()).
@@ -175,7 +180,7 @@ wait_for_unreachability(KillNode, RestNodes, Now) ->
     Time when Time > 10 ->
       exit(too_much_time);
     _ ->
-      case gen_server:call({lashup_gm, Node}, {path_to, [KillNode]}, 60000) of
+      case rpc:call(Node, lashup_gm_route, path_to, [KillNode]) of
         false ->
           ok;
         Else ->
