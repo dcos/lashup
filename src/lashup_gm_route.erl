@@ -27,6 +27,8 @@
 
 
 -ifdef(TEST).
+-behaviour(proper_statem).
+
 -export([proper/0]).
 
 -export([initial_state/0,
@@ -387,6 +389,10 @@ trim_edges(Node, Dsts) ->
 neighbors(Node) ->
   DstsEdges = ets:lookup(edges, Node),
   Dsts = [Edge#edge.dst || Edge <- DstsEdges],
+  %% We ordset it to:
+  %% (1) Dedupe (which shouldn't happen
+  %% (2) Sort the list, because it ensure we always take the same path ("smallest") when building the BFS
+  %%      since we add the nodes in order
   ordsets:from_list(Dsts).
 
 -spec(persist_node(Node :: node()) -> boolean()).
@@ -494,6 +500,7 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
 -ifdef(TEST).
 -compile(export_all).
 
+
 proper_test_() ->
   {timeout,
     3600,
@@ -504,10 +511,32 @@ proper() ->
   [] = proper:module(?MODULE, [{numtests, 10000}]).
 
 initial_state() ->
-  #{active_views => orddict:new()}.
+  Initial = #{},
+  Digraph = digraph:new(),
+  update_state(Digraph, Initial).
+
+state_to_digraph(_State = #{family := Family}) ->
+  sofs:family_to_digraph(Family).
+
+update_state(Digraph, State) ->
+  Family = sofs:digraph_to_family(Digraph),
+  digraph:delete(Digraph),
+  State#{family => Family}.
+
+get_path(_State = #{family := Family}, A, B) ->
+  Digraph = sofs:family_to_digraph(Family),
+  Result = digraph:get_path(Digraph, A, B),
+  digraph:delete(Digraph),
+  Result.
+
+get_short_path(_State = #{family := Family}, A, B) ->
+  Digraph = sofs:family_to_digraph(Family),
+  Result = digraph:get_short_path(Digraph, A, B),
+  digraph:delete(Digraph),
+  Result.
 
 
--define(NODES, [node(), node1@localhost, node2@localhost, node3@localhost,
+  -define(NODES, [node(), node1@localhost, node2@localhost, node3@localhost,
   node4@localhost, node5@localhost, node6@localhost,
   node7@localhost, node8@localhost, node9@localhost,
   node10@localhost, node11@localhost, node12@localhost,
@@ -519,29 +548,67 @@ initial_state() ->
 
 precondition(_State, _Call) -> true.
 
+
+postcondition(_State, {call, ?MODULE, reachable, [Node]}, Result) when Node == node() ->
+  true == Result;
 postcondition(State, {call, ?MODULE, reachable, [Node]}, Result) ->
-  case check_route(State, node(), Node) of
+  GetPath = get_path(State, node(), Node),
+  is_list(GetPath) ==  Result;
+
+%% This is a divergence from the digraph module
+%% If the node is in our routing table
+%% We will say the route back to the node is itself.
+postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) when FromNode == ToNode ->
+  Digraph = state_to_digraph(State),
+  PostCondition =
+  case digraph:vertex(Digraph, FromNode) of
     false ->
       Result == false;
     _ ->
-      Result == true
-  end;
+      Result == [FromNode]
+  end,
+  digraph:delete(Digraph),
+  PostCondition;
 postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) ->
-  is_list(Result) == is_list(check_route(State, FromNode, ToNode));
-
+  DigraphPath = get_short_path(State, FromNode, ToNode),
+  case {Result, DigraphPath}  of
+    {false, false} ->
+      true;
+    {false, P} when is_list(P) ->
+      false;
+    {P, false} when is_list(P) ->
+      false;
+    {Path1, Path2} when Path1 == Path2 ->
+      true;
+    {Path1, Path2} when length(Path1) =/= length(Path2) ->
+      false;
+    %% This is to take care of the case when there are multiple shortest paths
+    {Path1, _Path2} ->
+      Digraph = state_to_digraph(State),
+      Subgraph = digraph_utils:subgraph(Digraph, Path1),
+      digraph:delete(Digraph),
+      SubgraphPath = digraph:get_short_path(Subgraph, FromNode, ToNode),
+      digraph:delete(Subgraph),
+      Path1 == SubgraphPath
+  end;
 postcondition(_State, _Call, _Result) -> true.
 
 
-next_state(State = #{active_views := AVs}, _V,
+next_state(State, _V,
     {call, gen_server, call, [lashup_gm_route, {update_node, Node, NewNodes}]}) ->
-  AVs1 = orddict:store(Node, NewNodes, AVs),
-  State#{active_views => AVs1};
+  Digraph = state_to_digraph(State),
+  digraph:add_vertex(Digraph, Node),
+  [digraph:add_vertex(Digraph, NewNode) || NewNode <- NewNodes],
+  OldEdges = digraph:out_edges(Digraph, Node),
+  [digraph:del_edge(Digraph, OldEdge) || OldEdge <- OldEdges],
+  [digraph:add_edge(Digraph, Node, NewNode) || NewNode <- NewNodes],
+  update_state(Digraph, State);
 
-next_state(State = #{active_views := AVs}, _V,
+next_state(State, _V,
   {call, gen_server, call, [lashup_gm_route, {delete_node, Node}]}) ->
-  AVs1 = orddict:erase(Node, AVs),
-  AVs2 = orddict:map(fun(_, Dsts) -> [Dst|| Dst <- Dsts, Dst =/= Node] end, AVs1),
-  State#{active_views => AVs2};
+  Digraph = state_to_digraph(State),
+  digraph:del_vertex(Digraph, Node),
+  update_state(Digraph, State);
 
 next_state(State, _V, _Call) ->
   State.
@@ -549,12 +616,13 @@ next_state(State, _V, _Call) ->
 node_gen() ->
   oneof(?NODES).
 
-node_gen_list() ->
-  list(elements(?NODES)).
 
+node_gen_list(Except) ->
+  list(elements(?NODES -- [Except])).
 
+update_node_gen() ->
+  ?LET(Node, oneof(?NODES), {update_node, Node, node_gen_list(Node)}).
 
-verify_routes(FromNode, ToNode) when FromNode == ToNode -> true;
 verify_routes(FromNode, ToNode) ->
   case get_tree(FromNode) of
     false ->
@@ -564,22 +632,10 @@ verify_routes(FromNode, ToNode) ->
   end.
 
 
-check_route(_, FromNode, ToNode) when FromNode == ToNode ->
-  true;
-check_route(_State = #{active_views := AVs}, FromNode, ToNode) ->
-  Digraph = digraph:new(),
-  [digraph:add_vertex(Digraph, K) || {K, _V} <- AVs],
-  ExtraVs = lists:flatten([V || {_K, V} <- AVs]),
-  [digraph:add_vertex(Digraph, V) || V <- ExtraVs],
-  AddEdgeFun = fun(Src, Dsts) -> [digraph:add_edge(Digraph, Src, Dst) || Dst <- Dsts] end,
-  [AddEdgeFun(K, V) || {K, V} <- AVs],
-  Result = digraph:get_path(Digraph, FromNode, ToNode),
-  digraph:delete(Digraph),
-  Result.
 
 command(_S) ->
   oneof([
-      {call, gen_server, call, [?MODULE, {update_node, node_gen(), node_gen_list()}]},
+      {call, gen_server, call, [?MODULE, update_node_gen()]},
       {call, gen_server, call, [?MODULE, {delete_node, node_gen()}]},
       {call, ?MODULE, reachable, [node_gen()]},
       {call, ?MODULE, verify_routes, [node_gen(), node_gen()]}
