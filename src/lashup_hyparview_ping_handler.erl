@@ -299,11 +299,13 @@ determine_ping_time2(RecordedTimes) ->
       [InitialAcc|Rest] = RecordedTimes1,
       RecordedTimes2 = lists:foldl(fun filter_continuity_fold/2, [InitialAcc], Rest),
       RTTs = [RTT || {_, RTT} <- RecordedTimes2],
-      MaxRTT = lists:max(RTTs),
-      MaxRTTMS = erlang:convert_time_unit(trunc(MaxRTT), native, milli_seconds),
+      %% This is to ensure there is one non-zero RTT in the list
+      MaxRTT = lists:max([0.1|RTTs]),
+      MSPerNative = erlang:convert_time_unit(1, milli_seconds, native),
+      MaxRTTMS = MSPerNative * MaxRTT,
 
-      %% Any ping below 10ms is too "noisey" to matter
-      MaxRTTMSBound = math:log(min(10, MaxRTTMS)) / math:log(?LOG_BASE),
+      %% Any ping below 2ms is too "noisey" to matter
+      MaxRTTMSBound = math:log(1 + MaxRTTMS) / math:log(?LOG_BASE),
       MaxRTTMSBound1 = trunc(min(MaxRTTMSBound, ?MAX_PING_MS)),
       {MaxRTTMSBound1, RecordedTimes2}
   end.
