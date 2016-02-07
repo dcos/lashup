@@ -2,10 +2,15 @@
 %%% @author sdhillon
 %%% @copyright (C) 2016, <COMPANY>
 %%% @doc
+%%% An LSA routing database (RIB) routing information base
+%%% It has a cache that makes it suitable for a FIB
 %%%
 %%% @end
 %%% Created : 05. Feb 2016 6:14 PM
 %%%-------------------------------------------------------------------
+%%% TODO:
+%%% -Determine whether it makes more sense to stash the graph in a sofs
+%%% -Determine whether it makes sense to use sofs rather than maps to store the BFS trees
 -module(lashup_gm_route).
 -author("sdhillon").
 
@@ -22,7 +27,8 @@
   reachable_nodes/1,
   unreachable_nodes/1,
   path_to/1,
-  path_to/2
+  path_to/2,
+  children/2
 ]).
 
 
@@ -166,20 +172,32 @@ distance(Node, Tree) ->
 
 -spec(reachable_nodes(Tree :: tree()) -> [node()]).
 reachable_nodes(Tree) ->
-  TreeEntries = maps:filter(
-    fun(_Key, _TreeEntry = #tree_entry{distance = Distance}) ->
-      Distance =/= infinity
-    end,
-    Tree),
+  TreeEntries =
+    maps:filter(
+      fun(_Key, _TreeEntry = #tree_entry{distance = Distance}) ->
+        Distance =/= infinity
+      end,
+      Tree),
   maps:keys(TreeEntries).
 
 -spec(unreachable_nodes(Tree :: tree()) -> [node()]).
 unreachable_nodes(Tree) ->
-  TreeEntries = maps:filter(
-    fun(_Key, _TreeEntry = #tree_entry{distance = Distance}) ->
-      Distance == infinity
-    end,
-    Tree),
+  TreeEntries =
+    maps:filter(
+      fun(_Key, _TreeEntry = #tree_entry{distance = Distance}) ->
+        Distance == infinity
+      end,
+      Tree),
+  maps:keys(TreeEntries).
+
+-spec(children(Parent :: node(), Tree :: tree()) -> [node()]).
+children(Parent, Tree) ->
+  TreeEntries =
+    maps:filter(
+      fun(_Node, _TreeEntry = #tree_entry{parent = P, distance = Distance}) ->
+        P == Parent andalso Distance =/= 0
+      end,
+      Tree),
   maps:keys(TreeEntries).
 
 %%--------------------------------------------------------------------

@@ -16,7 +16,8 @@
   contact_nodes/0,
   protocol_period/0,
   full_probe_period/0,
-  min_departition_probe_interval/0
+  min_departition_probe_interval/0,
+  max_mc_replication/0
 ]).
 
 %% @doc
@@ -71,5 +72,12 @@ full_probe_period() ->
 -spec(min_departition_probe_interval() -> non_neg_integer()).
 min_departition_probe_interval() ->
   application:get_env(lashup, min_departition_probe_interval, 12000).
+
+%% @doc
+%% How many extra copies of a message to send through multicast
+%% @end
+-spec(max_mc_replication() -> pos_integer()).
+max_mc_replication() ->
+  application:get_env(lashup, max_mc_replication, 3).
 
 
