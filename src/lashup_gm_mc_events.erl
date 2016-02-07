@@ -14,6 +14,7 @@
 %% API
 -export([start_link/0,
   subscribe/1,
+  remote_subscribe/2,
   ingest/1]).
 
 %% gen_event callbacks
@@ -49,10 +50,16 @@ ingest(MulticastPacket) ->
 %% @end
 -spec(subscribe([lashup_gm_mc:topic()]) -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
 subscribe(Topics) ->
+  remote_subscribe(node(), Topics).
+
+-spec(remote_subscribe(Node :: node(), [lashup_gm_mc:topic()]) ->
+  {ok, reference()} | {'EXIT', term()} | {error, term()}).
+remote_subscribe(Node, Topics) ->
   TopicsSet = ordsets:from_list(Topics),
   Reference = make_ref(),
   State = #state{pid = self(), reference = Reference, topics_set = TopicsSet},
-  case gen_event:add_sup_handler(?SERVER, ?MODULE, State) of
+  EventMgrRef = event_mgr_ref(Node),
+  case gen_event:add_sup_handler(EventMgrRef, ?MODULE, State) of
     ok ->
       {ok, Reference};
     {'EXIT', Term} ->
@@ -61,7 +68,10 @@ subscribe(Topics) ->
       {error, Error}
   end.
 
-
+event_mgr_ref(Node) when Node == node() ->
+  ?SERVER;
+event_mgr_ref(Node) ->
+  {?SERVER, Node}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -205,6 +215,8 @@ handle_ingest2(Message, _State = #state{reference = Reference, pid = Pid}) ->
 
 -spec(maybe_add_debug_info(map(), lashup_gm_mc:multicast_packet()) -> map()).
 maybe_add_debug_info(Event, Message) ->
+  DI = lashup_gm_mc:debug_info(Message),
+  lager:info("DI: ~p", [DI]),
   case lashup_gm_mc:debug_info(Message) of
     false ->
       Event;

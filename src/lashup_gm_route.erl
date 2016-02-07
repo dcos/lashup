@@ -28,7 +28,8 @@
   unreachable_nodes/1,
   path_to/1,
   path_to/2,
-  children/2
+  children/2,
+  prune_tree/2
 ]).
 
 
@@ -199,6 +200,26 @@ children(Parent, Tree) ->
       end,
       Tree),
   maps:keys(TreeEntries).
+
+%% @doc
+%% Ensures there is a path between the root and the node
+%% @end
+-spec(prune_tree(Node :: node(), Tree :: tree()) -> tree()).
+prune_tree(Node, Tree) ->
+  prune_tree(Node, Tree, #{}).
+-spec(prune_tree(Node :: node(), Tree :: tree(), PrunedTree :: tree()) -> tree()).
+prune_tree(Node, Tree, PrunedTree) ->
+  case maps:get(Node, Tree, unknown) of
+    unknown ->
+      %% We did the best we could
+      PrunedTree;
+    TreeEntry = #tree_entry{distance = 0} ->
+      PrunedTree#{Node => TreeEntry};
+    TreeEntry = #tree_entry{parent = Parent} ->
+      PrunedTree1 = PrunedTree#{Node => TreeEntry},
+      prune_tree(Parent, Tree, PrunedTree1)
+  end.
+
 
 %%--------------------------------------------------------------------
 %% @doc

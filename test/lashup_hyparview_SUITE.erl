@@ -9,15 +9,16 @@
 -module(lashup_hyparview_SUITE).
 -author("sdhillon").
 -compile({parse_transform, lager_transform}).
+-compile(export_all).
 
 -include_lib("common_test/include/ct.hrl").
 -export([all/0, init_per_testcase/2, end_per_testcase/2]).
 -export([hyparview_test/1, failure_test0/1, failure_test60/1,
-  failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1]).
+  failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1, mc_test/1]).
 
 
 all() ->
-  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, failure_test0, failure_test60],
+  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test, failure_test0, failure_test60],
   case ci() of
     true ->
       BaseTests ++ [failure_test300];
@@ -265,3 +266,54 @@ check_graph(Nodes, Size) ->
   ct:pal("Components: ~p~n", [Components]),
   digraph:delete(Digraph),
   length(Components) == Size.
+
+
+
+mc_test(Config) ->
+  hyparview_test(Config),
+  AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
+  timer:sleep(60000), %% Let things settle out
+  [Node1, Node2, Node3] = choose_nodes(AllNodes, 3),
+  %% Test general messaging
+  {ok, Topic1RefNode1} = lashup_gm_mc_events:remote_subscribe(Node1, [topic1]),
+  R1 = make_ref(),
+  rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R1, [record_route]]),
+  true = 3 == expect_replies(Topic1RefNode1, R1),
+  timer:sleep(5000),
+  %% Make sure that we don't see "old" events
+  {ok, Topic1RefNode3} = lashup_gm_mc_events:remote_subscribe(Node3, [topic1]),
+  true = 0 == expect_replies(Topic1RefNode3, R1),
+  %% Test only nodes
+  R2 = make_ref(),
+  rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R2, [{only_nodes, [Node3]}]]),
+  true = 3 == expect_replies(Topic1RefNode3, R2),
+  true = 0 == expect_replies(Topic1RefNode1, R2),
+  R3 = make_ref(),
+  rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R3, [{fanout, 1}]]),
+  true = 1 == expect_replies(Topic1RefNode1, R3),
+  ok.
+
+
+expect_replies(Reference, Payload) ->
+  expect_replies(Reference, Payload, 0).
+
+expect_replies(Reference, Payload, Count) ->
+  receive
+    {lashup_gm_mc_event, Event = #{ref := Reference, payload := Payload}} ->
+      ct:pal("Received event (~p): ~p", [Count + 1, Event]),
+      expect_replies(Reference, Payload, Count + 1)
+  after 5000 ->
+    Count
+  end.
+
+choose_nodes(Nodes, Count) ->
+  choose_nodes(Nodes, Count, []).
+
+choose_nodes(_, 0, Acc) ->
+  Acc;
+choose_nodes(Nodes, Count, Acc) ->
+  Idx = random:uniform(length(Nodes)),
+  Node = lists:nth(Idx, Nodes),
+  Nodes1 = lists:delete(Node, Nodes),
+  choose_nodes(Nodes1, Count - 1, [Node|Acc]).
+

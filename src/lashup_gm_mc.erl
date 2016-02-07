@@ -41,7 +41,8 @@
 -type topic() :: atom().
 -type payload() :: term().
 -type multicast_packet() :: map().
--type mc_opt() :: record_route | loop | {fanout, Fanout :: pos_integer()} | {ttl, TTL :: pos_integer()}.
+-type mc_opt() :: record_route | loop | {fanout, Fanout :: pos_integer()} |
+  {ttl, TTL :: pos_integer()} | {only_nodes, Nodes :: [node()]}.
 
 -type debug_info() :: map().
 
@@ -83,8 +84,11 @@ payload(Packet) ->
 
 -spec(debug_info(Packet :: multicast_packet()) -> debug_info() | false).
 debug_info(Packet) ->
-  case gather_debug_info(Packet) of
-    #{} ->
+  DI =  gather_debug_info(Packet),
+  case DI of
+    %% This is awkward, and annoying
+    %%  #{} = #{foo => bar}.
+    Empty when Empty == #{} ->
       false;
     Else ->
       Else
@@ -235,13 +239,37 @@ handle_do_original_multicast(Topic, Payload, Options, _State) ->
   Packet = new_multicast_packet(Topic, Payload),
   Packet1 = lists:foldl(fun add_option/2, Packet, Options),
   ActiveView = lashup_hyparview_membership:get_active_view(),
-  Seed = lashup_utils:seed(),
-  ActiveViewShuffled = lashup_utils:shuffle_list(ActiveView, Seed),
   Fanout = get_fanout(Options),
-  ActiveViewTruncated = lists:sublist(ActiveViewShuffled, Fanout),
-  %% The first packet goes to everyone in the active view
+  ActiveViewTruncated = determine_fakeroots(ActiveView, Fanout - 1),
+  do_original_cast(node(), Packet1),
+  %% TODO: Try to make the trees intersect as little as possible
   [do_original_cast(Node, Packet1) || Node <- ActiveViewTruncated],
   ok.
+
+%% @doc
+%% determine the fakeroots
+%% If the ActiveView is bigger than the fanout, we're going to dump the first node in the active view
+%% (lexically sorted).
+%% The reason behind this with the BSP Algorithm + Hyparview, it's likely that when the multicast is done
+%% treating self = fakeroot, it's going to reach the entire graph
+%% Therefore, we want to spread traffic to the upper nodes
+%% @end
+-spec(determine_fakeroots(ActiveView :: [node()], Fanout :: pos_integer()) -> [node()]).
+%% Short circuit
+determine_fakeroots([], _) ->
+  [];
+determine_fakeroots(_, 0) ->
+  [];
+determine_fakeroots(ActiveView, Fanout) when length(ActiveView) > Fanout ->
+  %% We can do this safely, without losing fidelity, because we know the active view
+  %% has at least one more member than the fanout
+  [_|ActiveView1] = ActiveView,
+  Seed = lashup_utils:seed(),
+  ActiveView1Shuffled = lashup_utils:shuffle_list(ActiveView1, Seed),
+  lists:sublist(ActiveView1Shuffled, Fanout);
+determine_fakeroots(ActiveView, _Fanout) ->
+  ActiveView.
+
 
 %% @doc
 %% At the original cast, we replicate the packet the size of the active view
@@ -269,15 +297,29 @@ get_fanout(Options) ->
 %% 1. Process the packet, and forward it on
 %% 2. Fan it out to lashup_gm_mc_events
 -spec(handle_multicast_packet(multicast_packet(), state()) -> ok).
-handle_multicast_packet(MulticastPacket = #{origin := Origin, loop := true}, State) when Origin == node() ->
-  maybe_forward_packet(MulticastPacket, State),
-  lashup_gm_mc_events:ingest(MulticastPacket),
-  ok;
-handle_multicast_packet(MulticastPacket  = #{origin := Origin}, State) when Origin == node() ->
-  maybe_forward_packet(MulticastPacket, State),
-  ok;
 handle_multicast_packet(MulticastPacket, State) ->
   maybe_forward_packet(MulticastPacket, State),
+  maybe_ingest(MulticastPacket),
+  ok.
+
+-spec(maybe_ingest(multicast_packet()) -> ok).
+maybe_ingest(MulticastPacket = #{only_nodes := Nodes}) ->
+  case lists:member(node(), Nodes) of
+    true ->
+      maybe_ingest2(MulticastPacket);
+    false ->
+      ok
+  end;
+maybe_ingest(MulticastPacket) ->
+  maybe_ingest2(MulticastPacket).
+
+-spec(maybe_ingest2(multicast_packet()) -> ok).
+maybe_ingest2(MulticastPacket = #{origin := Origin, loop := true}) when Origin == node() ->
+  lashup_gm_mc_events:ingest(MulticastPacket),
+  ok;
+maybe_ingest2(_MulticastPacket  = #{origin := Origin}) when Origin == node() ->
+  ok;
+maybe_ingest2(MulticastPacket) ->
   lashup_gm_mc_events:ingest(MulticastPacket),
   ok.
 
@@ -287,7 +329,8 @@ maybe_forward_packet(_MulticastPacket = #{ttl := 0, no_ttl_warning := true}, _St
 maybe_forward_packet(_MulticastPacket = #{ttl := 0}, _State) ->
   lager:warning("TTL Exceeded on Multicast Packet"),
   ok;
-maybe_forward_packet(MulticastPacket = #{fakeroot := FakeRoot, ttl := TTL, origin := Origin, options := Options}, State) ->
+maybe_forward_packet(MulticastPacket = #{fakeroot := FakeRoot, ttl := TTL, origin := Origin, options := Options},
+    State) ->
   case lashup_gm_route:get_tree(FakeRoot) of
     {tree, Tree} ->
       MulticastPacket1 = MulticastPacket#{ttl := TTL - 1},
@@ -300,6 +343,12 @@ maybe_forward_packet(MulticastPacket = #{fakeroot := FakeRoot, ttl := TTL, origi
 
 
 -spec(forward_packet(multicast_packet(), lashup_gm_route:tree(), state()) -> ok).
+forward_packet(MulticastPacket = #{only_nodes := Nodes}, Tree, _State) ->
+  Trees = [lashup_gm_route:prune_tree(Node, Tree) || Node <- Nodes],
+  Tree1 = lists:foldl(fun maps:merge/2, #{}, Trees),
+  Children = lashup_gm_route:children(node(), Tree1),
+  gen_server:abcast(Children, ?SERVER, MulticastPacket),
+  ok;
 forward_packet(MulticastPacket, Tree, _State) ->
   Children = lashup_gm_route:children(node(), Tree),
   gen_server:abcast(Children, ?SERVER, MulticastPacket),
@@ -321,6 +370,9 @@ add_option(loop, Packet) ->
 add_option(record_route, Packet = #{options := Options}) ->
   Options1 = [record_route|Options],
   Packet#{route => [node()], options := Options1};
+add_option({OptionKey, OptionValue}, Packet = #{options := Options}) ->
+  Options1 = [OptionKey|Options],
+  Packet#{options := Options1, OptionKey => OptionValue};
 add_option(Option, Packet = #{options := Options}) ->
   Options1 = [Option|Options],
   Packet#{options := Options1}.
@@ -355,4 +407,7 @@ validate_option(loop) ->
 validate_option({fanout, N}) when N > 0 ->
   ok;
 validate_option({ttl, N}) when N > 0 ->
+  ok;
+validate_option({only_nodes, Nodes}) ->
+  [true = is_atom(Node) || Node <- Nodes],
   ok.
