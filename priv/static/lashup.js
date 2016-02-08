@@ -42,18 +42,27 @@ function sendMessage(msg) {
 
 function process_initial_state(message) {
     for (var nn in message["nodes"]) {
-        gm_nodes
-        console.log(nn);
+        gm_nodes[nn] = message["nodes"][nn];
+        nodes.push(gm_nodes[nn]);
+        //console.log(nn);
+    }
+    createLinks();
+    restart();
+}
+function createLinks() {
+    for (var nn in gm_nodes) {
+        var active_view = gm_nodes[nn]["active_view"];
+        active_view.forEach(function(target) {
+            links.push({"source": gm_nodes[nn], "target": gm_nodes[target]})
+        });
     }
 }
 
 var force;
 var nodes = [
-    {"name":"Myriel","group":1},
-    {"name":"Napoleon","group":1}
 ];
 var links = [
-    {"source":nodes[0], "target":nodes[1]}
+    //{"source":nodes[0], "target":nodes[1]}
 ];
 var node;
 var link;
@@ -62,53 +71,74 @@ var color = d3.scale.category20();
 
 
 function setupGraph() {
-    var width = 960, height = 500;
+    var width = 1280, height = 960;
 
     svg = d3.select("body").append("svg")
         .attr("width", width)
         .attr("height", height);
 
     force = d3.layout.force()
-        .charge(-120)
-        .linkDistance(100)
-        .linkStrength(1)
         .size([width, height])
         .nodes(nodes)
         .links(links);
 
+    force.linkDistance(width/3);
 
+    force.linkStrength(0.1);
+
+    force.gravity(0.05);
+
+    force.charge(
+        function(node) {
+            return -300;
+        }
+    )
     force.on("tick", tick);
-
     restart();
-
 }
+
 function magic() {
     link = svg.selectAll(".link")
-        .data(links)
-        .enter().append("line")
-        .attr("class", "link")
+        .data(links);
+    linkenter = link
+        .enter()
+        .append("line")
+        .attr("class", "link");
+
+    linkexit = link
+        .exit();
+    linkexit.remove();
+
+    linkenter
         .style("stroke-width", function(d) { return 5; });
+
     node = svg.selectAll(".node")
-        .data(nodes)
+        .data(nodes);
+
+    nodeexit = node.exit();
+    nodeexit.remove();
+
+    nodeenter = node
         .enter()
         .append("g")
         .attr("class", "node");
 
-    node.append("circle")
-        .attr("r", 30)
+    nodeenter.call(force.drag);
+
+
+    nodeenter
+        .append("ellipse")
+        .attr("rx", 75)
+        .attr("ry", 20)
       //  .attr("fill", function(d) { return color(d.name); })
         .attr("fill", "white")
         .attr("fill-opacity", 1.00)
         .attr("stroke", "black");
 
-
-
-
-
-    node.append("text")
+    nodeenter
+        .append("text")
         .attr("text-anchor", "middle")
         .text(function(d) { return d.name });
-
 }
 
 function tick() {
