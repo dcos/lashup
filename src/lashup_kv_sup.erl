@@ -4,10 +4,9 @@
 %%% @doc
 %%%
 %%% @end
-%%% Created : 06. Jan 2016 3:37 PM
+%%% Created : 07. Feb 2016 6:16 PM
 %%%-------------------------------------------------------------------
--module(lashup_hyparview_sup).
--author("sdhillon").
+-module(lashup_kv_sup).
 
 -behaviour(supervisor).
 
@@ -32,11 +31,9 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, { {rest_for_one, 5, 10}, [
-    ?CHILD(lashup_hyparview_ping_events, worker),
-    ?CHILD(lashup_hyparview_events, worker),
-    ?CHILD(lashup_hyparview_ping_handler, worker),
-    ?CHILD(lashup_hyparview_membership, worker),
-    ?CHILD(lashup_gm_sup, supervisor)
-  ]} }.
+  {ok, {{one_for_one, 5, 10}, [
+    ?CHILD(lashup_kv, worker),
+    ?CHILD(lashup_kv_time, worker)
+    ]}}.
+
 

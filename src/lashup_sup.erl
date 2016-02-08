@@ -16,12 +16,16 @@
 %% ===================================================================
 
 start_link() ->
-    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
+  supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 %% ===================================================================
 %% Supervisor callbacks
 %% ===================================================================
 
 init([]) ->
-    {ok, { {one_for_one, 5, 10}, [?CHILD(lashup_hyparview_sup, supervisor)]} }.
+  {ok, {{rest_for_one, 5, 10}, [
+    ?CHILD(lashup_hyparview_sup, supervisor),
+    ?CHILD(lashup_kv_sup, supervisor),
+    ?CHILD(lashup_nerve_center, supervisor)
+  ]}}.
 

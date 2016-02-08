@@ -34,6 +34,7 @@ start_link() ->
 init([]) ->
   {ok, { {one_for_all, 5, 10}, [
     ?CHILD(lashup_gm_worker_sup, supervisor),
+    ?CHILD(lashup_gm_events, worker),
     ?CHILD(lashup_gm_route, worker),
     ?CHILD(lashup_gm, worker),
     ?CHILD(lashup_gm_probe, worker),

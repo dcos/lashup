@@ -6,15 +6,15 @@
 %%% @end
 %%% Created : 06. Feb 2016 4:48 AM
 %%%-------------------------------------------------------------------
--module(lashup_gm_mc_events).
+-module(lashup_gm_events).
 -author("sdhillon").
 
 -behaviour(gen_event).
 
 %% API
 -export([start_link/0,
-  subscribe/1,
-  remote_subscribe/2,
+  subscribe/0,
+  remote_subscribe/1,
   ingest/1]).
 
 %% gen_event callbacks
@@ -29,35 +29,34 @@
 
 -record(state, {
   reference = erlang:error() :: reference() ,
-  topics_set = erlang:error() :: ordsets:ordset(lashup_gm_mc:topic()),
   pid = erlang:error() :: pid()
 }).
 -type state() :: state().
 
+-include("lashup.hrl").
 %%%===================================================================
 %%% gen_event callbacks
 %%%===================================================================
 
--spec(ingest(lashup_gm_mc:multicast_packet()) -> ok).
-ingest(MulticastPacket) ->
-  gen_event:notify(?SERVER, {ingest, MulticastPacket}),
+-spec(ingest(member()) -> ok).
+ingest(Member) ->
+  gen_event:notify(?SERVER, {ingest, Member}),
   ok.
 
 %% @doc
 %% Subscribes a process to zero or more topics
 %% Processes then get messages like:
-%% {lashup_gm_mc_event, #{ref => Reference, payload => Payload}}
+%% {@module, #{ref => Reference, payload => Payload}}
 %% @end
--spec(subscribe([lashup_gm_mc:topic()]) -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
-subscribe(Topics) ->
-  remote_subscribe(node(), Topics).
+-spec(subscribe() -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
+subscribe() ->
+  remote_subscribe(node()).
 
--spec(remote_subscribe(Node :: node(), [lashup_gm_mc:topic()]) ->
+-spec(remote_subscribe(Node :: node()) ->
   {ok, reference()} | {'EXIT', term()} | {error, term()}).
-remote_subscribe(Node, Topics) ->
-  TopicsSet = ordsets:from_list(Topics),
+remote_subscribe(Node) ->
   Reference = make_ref(),
-  State = #state{pid = self(), reference = Reference, topics_set = TopicsSet},
+  State = #state{pid = self(), reference = Reference},
   EventMgrRef = event_mgr_ref(Node),
   case gen_event:add_sup_handler(EventMgrRef, ?MODULE, State) of
     ok ->
@@ -119,8 +118,8 @@ init(State) ->
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   remove_handler).
 %%
-handle_event({ingest, Message}, State) ->
-  handle_ingest(Message, State),
+handle_event({ingest, Member}, State) ->
+  handle_ingest(Member, State),
   {ok, State};
 handle_event(_Message, State) ->
   {ok, State}.
@@ -195,31 +194,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec(handle_ingest(lashup_gm_mc:multicast_packet(), state()) -> ok).
-handle_ingest(Message, State = #state{topics_set = TopicSet}) ->
-  Topic = lashup_gm_mc:topic(Message),
-  case ordsets:is_element(Topic, TopicSet) of
-    true ->
-      handle_ingest2(Message, State);
-    false ->
-      ok
-  end.
-
--spec(handle_ingest2(lashup_gm_mc:multicast_packet(), state()) -> ok).
-handle_ingest2(Message, _State = #state{reference = Reference, pid = Pid}) ->
-  Payload = lashup_gm_mc:payload(Message),
-  Origin = lashup_gm_mc:origin(Message),
-  Event = #{payload => Payload, ref => Reference, origin => Origin},
-  Event1 = maybe_add_debug_info(Event, Message),
-  Pid ! {lashup_gm_mc_event, Event1},
-  ok.
-
--spec(maybe_add_debug_info(map(), lashup_gm_mc:multicast_packet()) -> map()).
-maybe_add_debug_info(Event, Message) ->
-  case lashup_gm_mc:debug_info(Message) of
-    false ->
-      Event;
-    DebugInfo ->
-      Event#{debug_info => DebugInfo}
-  end.
+-spec(handle_ingest(member(), state()) -> ok).
+handle_ingest(Member, _State = #state{reference = Reference, pid = Pid}) ->
+  Event = #{member => Member, ref => Reference},
+  Pid ! {?MODULE, Event}.
 

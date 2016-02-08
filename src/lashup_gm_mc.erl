@@ -23,7 +23,8 @@
   ensure_payload_decompressed/1,
   topic/1,
   payload/1,
-  debug_info/1
+  debug_info/1,
+  origin/1
 ]).
 
 %% gen_server callbacks
@@ -81,6 +82,11 @@ topic(_Packet = #{topic := Topic}) ->
 payload(Packet) ->
   Packet1 = ensure_payload_decompressed(Packet),
   maps:get(payload, Packet1).
+
+
+-spec(origin(Packet :: multicast_packet()) -> node()).
+origin(Packet) ->
+  maps:get(origin, Packet).
 
 -spec(debug_info(Packet :: multicast_packet()) -> debug_info() | false).
 debug_info(Packet) ->

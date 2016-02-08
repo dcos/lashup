@@ -4,6 +4,8 @@
   {vsn, "1"},
   {registered, []},
   {applications, [
+                  sync,
+                  cowboy,
                   kernel,
                   stdlib,
                   lager,

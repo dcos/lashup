@@ -58,7 +58,7 @@
 
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
-  ping_times = dict:new() :: dict:dict(Node :: node(), PingRecord :: ping_record())
+  ping_times = #{} :: map()
 }).
 -type state() :: #state{}.
 
@@ -229,7 +229,7 @@ handle_ping_failed(Ref, State = #state{ping_times = PingTimes}) ->
       lager:info("Didn't receive Pong from Node: ~p in time: ~p", [Node, RTT]),
       lashup_hyparview_membership:ping_failed(Node),
       PIF2 = orddict:erase(Ref, PIF),
-      PingTimes2 = dict:erase(Node, PingTimes),
+      PingTimes2 = maps:without([Node], PingTimes),
       State#state{pings_in_flight = PIF2, ping_times = PingTimes2};
     error ->
       State
@@ -263,26 +263,23 @@ record_pong(_PongMessage = #{receiving_node := ReceivingNode, now := SendTime},
   %% Filters both on retention time
   %% And retention count
   %% Contuinity should be handled at ping time, I think
-  UpdateFun =
-    fun(RecordedTimes) ->
-      RecordedTimes1 = lists:sublist(RecordedTimes, 1, ?PING_RETENTION_COUNT - 1),
-      RecordedTimes2 = [Entry || Entry = {RecordedTime, _} <- RecordedTimes1, RecordedTime > RetentionTime],
-      [{Now, RTT}|RecordedTimes2]
-    end,
-
-  Initial = [{erlang:monotonic_time(), RTT}],
-  PingTimes1 = dict:update(ReceivingNode, UpdateFun, Initial, PingTimes),
+  RecordedTimes = maps:get(ReceivingNode, PingTimes, []),
+  RecordedTimes1 = lists:sublist(RecordedTimes, 1, ?PING_RETENTION_COUNT - 1),
+  RecordedTimes2 = [Entry || Entry = {RecordedTime, _} <- RecordedTimes1, RecordedTime > RetentionTime],
+  RecordedTimes3 = [{Now, RTT}|RecordedTimes2],
+  PingTimes1 = PingTimes#{ReceivingNode => RecordedTimes3},
+  lashup_hyparview_ping_events:ingest(#{ReceivingNode => RecordedTimes3}),
   State#state{ping_times = PingTimes1}.
 
 -spec(determine_ping_time(Node :: node(), State :: state()) -> {RTT :: non_neg_integer(), State1 :: state()}).
 determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
   %% If unknown then might as well return the MAX PING
-  case dict:find(Node, PingTimes) of
+  case maps:find(Node, PingTimes) of
     error ->
       {?MAX_PING_MS, State};
     {ok, PingRecords} ->
       {RTT, PingRecords1} = determine_ping_time2(PingRecords),
-      PingTimes1 = dict:store(Node, PingRecords1, PingTimes),
+      PingTimes1 = PingTimes#{Node := PingRecords1},
       State1 = State#state{ping_times = PingTimes1},
       {RTT, State1}
   end.
@@ -333,5 +330,5 @@ handle_purge(State = #state{ping_times = PingTimes}) ->
       (_Key, _) ->
         true
     end,
-  PingTimes1 = dict:filter(Predicate, PingTimes),
+  PingTimes1 = maps:filter(Predicate, PingTimes),
   State#state{ping_times = PingTimes1}.

@@ -514,7 +514,12 @@ accumulate_membership(Member, Acc) ->
   Now = erlang:monotonic_time(),
   [LastHeard | _] = Member#member.locally_updated_at,
   TimeSinceLastHeard = erlang:convert_time_unit(Now - LastHeard, native, milli_seconds),
-  Node = #{node => Member#member.node, time_since_last_heard => TimeSinceLastHeard, metadata => Member#member.metadata},
+  Node = #{
+    node => Member#member.node,
+    time_since_last_heard => TimeSinceLastHeard,
+    metadata => Member#member.metadata,
+    active_view => Member#member.active_view
+  },
   [Node | Acc].
 
 trim_nodes(State) ->
@@ -605,6 +610,7 @@ delete_node_ips(_Member) ->
 %% Rewrite both
 -spec(persist(Member :: member(), State :: state()) -> ok).
 persist(Member, _State) ->
+  lashup_gm_events:ingest(Member),
   lashup_gm_route:update_node(Member#member.node, Member#member.active_view),
   case ets:lookup(members, Member#member.nodekey) of
     [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
