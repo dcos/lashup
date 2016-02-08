@@ -43,116 +43,101 @@ function sendMessage(msg) {
 function process_initial_state(message) {
     for (var nn in message["nodes"]) {
         gm_nodes[nn] = message["nodes"][nn];
-        nodes.push(gm_nodes[nn]);
+        cy.add({
+            group: "nodes",
+            data: { id: nn },
+            name: nn
+        });
+        //nodes.push(gm_nodes[nn]);
         //console.log(nn);
     }
     createLinks();
-    restart();
+    defaultLayout();
 }
 function createLinks() {
+    edges = [];
     for (var nn in gm_nodes) {
         var active_view = gm_nodes[nn]["active_view"];
         active_view.forEach(function(target) {
-            links.push({"source": gm_nodes[nn], "target": gm_nodes[target]})
+            a = [nn, target];
+            a.sort();
+            id = a.join('_')
+
+            edges.push({ group: "edges", data: { id: id, source: nn, target: target } })
         });
     }
+    cy.add(edges);
 }
-
-var force;
-var nodes = [
-];
-var links = [
-    //{"source":nodes[0], "target":nodes[1]}
-];
-var node;
-var link;
-var svg;
-var color = d3.scale.category20();
-
+var cy;
+var layout = null;
 
 function setupGraph() {
-    var width = 1280, height = 960;
+    cy = cytoscape(
+        {
+            container: document.getElementById('lashup'), // container to render in
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'height': 20,
+                        'width': 120,
+                        'background-color': '#ccc',
+                        'label': 'data(id)',
+                        'font-size': '8px',
+                        'text-valign': 'center',
+                        'text-halign': 'center'
+                    }
+                },
 
-    svg = d3.select("body").append("svg")
-        .attr("width", width)
-        .attr("height", height);
-
-    force = d3.layout.force()
-        .size([width, height])
-        .nodes(nodes)
-        .links(links);
-
-    force.linkDistance(width/3);
-
-    force.linkStrength(0.1);
-
-    force.gravity(0.05);
-
-    force.charge(
-        function(node) {
-            return -300;
+                {
+                    selector: 'edge',
+                    style: {
+                        'width': 3,
+                        'line-color': '#ccc',
+                        'curve-style': 'unbundled-bezier'
+                    }
+                }
+            ]
         }
-    )
-    force.on("tick", tick);
-    restart();
-}
+    );
+    cy.on('grab', function(event){
+        if (event.cyTarget.isNode()) {
+            if (layout) { layout.stop(); };
+            layout = cy.makeLayout({
+                roots: [event.cyTarget.id()],
+                name: 'breadthfirst',
+                nodeSpacing: 5,
+                edgeLengthVal: 45,
+                animate: true,
+                randomize: false,
+                maxSimulationTime: 1500,
+                animationDuration: 1500
+            });
+            layout.run()
+        }
+    });
+    cy.on('tap', function(event){
+        // cyTarget holds a reference to the originator
+        // of the event (core or element)
+        var evtTarget = event.cyTarget;
 
-function magic() {
-    link = svg.selectAll(".link")
-        .data(links);
-    linkenter = link
-        .enter()
-        .append("line")
-        .attr("class", "link");
-
-    linkexit = link
-        .exit();
-    linkexit.remove();
-
-    linkenter
-        .style("stroke-width", function(d) { return 5; });
-
-    node = svg.selectAll(".node")
-        .data(nodes);
-
-    nodeexit = node.exit();
-    nodeexit.remove();
-
-    nodeenter = node
-        .enter()
-        .append("g")
-        .attr("class", "node");
-
-    nodeenter.call(force.drag);
-
-
-    nodeenter
-        .append("ellipse")
-        .attr("rx", 75)
-        .attr("ry", 20)
-      //  .attr("fill", function(d) { return color(d.name); })
-        .attr("fill", "white")
-        .attr("fill-opacity", 1.00)
-        .attr("stroke", "black");
-
-    nodeenter
-        .append("text")
-        .attr("text-anchor", "middle")
-        .text(function(d) { return d.name });
-}
-
-function tick() {
-    link.attr("x1", function(d) { return d.source.x; })
-        .attr("y1", function(d) { return d.source.y; })
-        .attr("x2", function(d) { return d.target.x; })
-        .attr("y2", function(d) { return d.target.y; });
-
-    node.attr("transform", function(d) { return "translate(" + d.x + "," + d.y + ")"; });
+        if( evtTarget === cy ){
+            defaultLayout();
+        }
+    });
 
 }
 
-
-function restart() {
-    magic();
-    force.start();
+function defaultLayout() {
+    if (layout) { layout.stop(); };
+    layout = cy.makeLayout({
+        name: 'circle',
+        nodeSpacing: 5,
+        edgeLengthVal: 45,
+        animate: true,
+        randomize: false,
+        maxSimulationTime: 1500,
+        animationDuration: 1500
+    });
+    layout.run();
 }
