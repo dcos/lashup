@@ -17,7 +17,8 @@
   protocol_period/0,
   full_probe_period/0,
   min_departition_probe_interval/0,
-  max_mc_replication/0
+  max_mc_replication/0,
+  aae_interval/0
 ]).
 
 %% @doc
@@ -79,5 +80,11 @@ min_departition_probe_interval() ->
 -spec(max_mc_replication() -> pos_integer()).
 max_mc_replication() ->
   application:get_env(lashup, max_mc_replication, 3).
+
+%% @doc
+%% How often we message our Vector Clocks for AAE in milliseconds
+aae_interval() ->
+  application:get_env(lashup, aae_interval, 300000).
+
 
 

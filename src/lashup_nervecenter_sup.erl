@@ -1,4 +1,12 @@
--module(lashup_sup).
+%%%-------------------------------------------------------------------
+%%% @author sdhillon
+%%% @copyright (C) 2016, <COMPANY>
+%%% @doc
+%%%
+%%% @end
+%%% Created : 08. Feb 2016 7:55 AM
+%%%-------------------------------------------------------------------
+-module(lashup_nervecenter_sup).
 
 -behaviour(supervisor).
 
@@ -23,8 +31,8 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, {{rest_for_one, 5, 10}, [
-    ?CHILD(lashup_hyparview_sup, supervisor),
-    ?CHILD(lashup_svc_sup, supervisor)
+  {ok, {{one_for_one, 5, 10}, [
+    ?CHILD(lashup_nervecenter_collector, worker),
+    ?CHILD(lashup_nerve_center, supervisor)
   ]}}.
 

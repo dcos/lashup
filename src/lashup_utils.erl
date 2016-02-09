@@ -11,7 +11,8 @@
 
 %% API
 -export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
-  get_dcos_ip/0, erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2]).
+  get_dcos_ip/0, erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2,
+  wakeup_loop/2, wakeup_loop/1, linear_ramp_up/2]).
 
 -record(window, {
   samples = [] :: list(integer()),
@@ -178,5 +179,46 @@ subtract(List1, List2) ->
   List1Set = ordsets:from_list(List1),
   List2Set = ordsets:from_list(List2),
   ordsets:subtract(List1Set, List2Set).
+
+%% @doc Sends the message every Time to 2*Time milliseconds
+%%
+wakeup_loop(Message, TimeResolver) ->
+  spawn_link(?MODULE, wakeup_loop, [{0, Message, TimeResolver, self()}]).
+
+%% @private Wakeup main loop
+wakeup_loop(State = {0, _, _, _}) ->
+  random:seed(seed()),
+  State1 = setelement(1, State, 1),
+  wakeup_loop(State1);
+
+wakeup_loop(State = {Count, Message, TimeResolver, Pid}) when is_function(TimeResolver, 0) ->
+  jitter_sleep(TimeResolver()),
+  Pid ! Message,
+  wakeup_loop(setelement(1, State, Count + 1));
+wakeup_loop(State = {Count, Message, TimeResolver, Pid}) when is_function(TimeResolver, 1) ->
+  jitter_sleep(TimeResolver(Count)),
+  Pid ! Message,
+  wakeup_loop(setelement(1, State, Count + 1));
+wakeup_loop(State = {Count, Message, Time, Pid}) when is_integer(Time) ->
+  jitter_sleep(Time),
+  Pid ! Message,
+  wakeup_loop(setelement(1, State, Count + 1)).
+
+jitter_sleep(Time) ->
+  Multiplier = 1 + random:uniform(),
+  Sleep = trunc(Time * Multiplier),
+  timer:sleep(Sleep).
+
+linear_ramp_up(TimerResolver, RampupPeriod) when is_integer(TimerResolver) ->
+  linear_ramp_up(fun() -> TimerResolver end, RampupPeriod);
+linear_ramp_up(TimerResolver, RampupPeriod) when is_function(TimerResolver, 0) ->
+  fun(Count) ->
+    (Count / RampupPeriod) * TimerResolver()
+  end;
+linear_ramp_up(TimerResolver, RampupPeriod) when is_function(TimerResolver, 1) ->
+  fun(Count) ->
+    (Count / RampupPeriod) * TimerResolver(Count)
+  end.
+
 
 

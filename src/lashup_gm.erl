@@ -19,7 +19,9 @@
   gm/0,
   path_to/1,
   set_metadata/1,
-  get_neighbor_recommendations/1
+  get_neighbor_recommendations/1,
+  seed/0,
+  lookup_node/2
 ]).
 
 %% gen_server callbacks
@@ -72,11 +74,23 @@ set_metadata(Metadata) ->
 get_neighbor_recommendations(ActiveViewSize) ->
   gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
+lookup_node(Node, Seed) ->
+  case ets:lookup(members, nodekey(Node, Seed)) of
+    [] ->
+      error;
+    [Member] ->
+      {ok, Member}
+  end.
+
 gm() ->
-  gen_server:call(?SERVER, gm).
+  get_membership().
 
 get_subscriptions() ->
   gen_server:call(?SERVER, get_subscriptions).
+
+seed() ->
+  gen_server:call(?SERVER, seed).
+
 
 
 %%--------------------------------------------------------------------
@@ -159,6 +173,8 @@ handle_call(update_node, _From, State) ->
 handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
   {reply, Reply, State};
+handle_call(seed, _From, State = #state{seed = Seed}) ->
+  {reply, Seed, State};
 handle_call(Request, _From, State) ->
   lager:debug("Received unknown request: ~p", [Request]),
   {reply, ok, State}.
@@ -610,10 +626,10 @@ delete_node_ips(_Member) ->
 %% Rewrite both
 -spec(persist(Member :: member(), State :: state()) -> ok).
 persist(Member, _State) ->
-  lashup_gm_events:ingest(Member),
   lashup_gm_route:update_node(Member#member.node, Member#member.active_view),
   case ets:lookup(members, Member#member.nodekey) of
-    [_OldMember = #member{metadata = #{ips := OldIPs}}] ->
+    [OldMember = #member{metadata = #{ips := OldIPs}}] ->
+      lashup_gm_events:ingest(OldMember, Member),
       NewIPs = maps:get(ips, Member#member.metadata, []),
       IPsToRemove = OldIPs -- NewIPs,
       IPsToAdd = NewIPs -- OldIPs,
@@ -621,6 +637,7 @@ persist(Member, _State) ->
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd);
     [] ->
+      lashup_gm_events:ingest(Member),
       IPsToAdd = maps:get(ips, Member#member.metadata, []),
       RecordsToAdd = [{IP, Member#member.node} || IP <- IPsToAdd],
       ets:insert(node_ips, RecordsToAdd),

@@ -32,8 +32,8 @@ start_link() ->
 
 init([]) ->
   {ok, {{one_for_one, 5, 10}, [
-    ?CHILD(lashup_kv, worker),
-    ?CHILD(lashup_kv_time, worker)
+    ?CHILD(lashup_kv, worker)
+    %?CHILD(lashup_kv_time, worker)
     ]}}.
 
 

@@ -15,7 +15,9 @@
 -export([start_link/0,
   subscribe/0,
   remote_subscribe/1,
-  ingest/1]).
+  ingest/1,
+  ingest/2
+]).
 
 %% gen_event callbacks
 -export([init/1,
@@ -37,6 +39,12 @@
 %%%===================================================================
 %%% gen_event callbacks
 %%%===================================================================
+
+-spec(ingest(member(), member()) -> ok).
+ingest(OldMember, NewMember) ->
+  gen_event:notify(?SERVER, {ingest, OldMember, NewMember}),
+  ok.
+
 
 -spec(ingest(member()) -> ok).
 ingest(Member) ->
@@ -121,6 +129,9 @@ init(State) ->
 handle_event({ingest, Member}, State) ->
   handle_ingest(Member, State),
   {ok, State};
+handle_event({ingest, OldMember, NewMember}, State) ->
+  handle_ingest(OldMember, NewMember, State),
+  {ok, State};
 handle_event(_Message, State) ->
   {ok, State}.
 
@@ -195,7 +206,12 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 -spec(handle_ingest(member(), state()) -> ok).
-handle_ingest(Member, _State = #state{reference = Reference, pid = Pid}) ->
-  Event = #{member => Member, ref => Reference},
+handle_ingest(Member,_State = #state{reference = Reference, pid = Pid}) ->
+  Event = #{type => new_member, member => Member, ref => Reference},
+  Pid ! {?MODULE, Event}.
+
+-spec(handle_ingest(member(), member(), state()) -> ok).
+handle_ingest(OldMember, NewMember, _State = #state{reference = Reference, pid = Pid}) ->
+  Event = #{type => member_change, old_member => OldMember, member => NewMember, ref => Reference},
   Pid ! {?MODULE, Event}.
 

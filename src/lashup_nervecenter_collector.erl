@@ -2,20 +2,17 @@
 %%% @author sdhillon
 %%% @copyright (C) 2016, <COMPANY>
 %%% @doc
-%%% This is eventually going to be the scaffolding for a hybrid logical clock server
-%%% so we can LWW with confidence
-%%% RIGHT NOW IT IS ***DISABLED***
+%%%
 %%% @end
-%%% Created : 07. Feb 2016 6:23 PM
+%%% Created : 08. Feb 2016 7:58 AM
 %%%-------------------------------------------------------------------
--module(lashup_kv_time).
+-module(lashup_nervecenter_collector).
 -author("sdhillon").
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/0,
-  entries/0]).
+-export([start_link/0]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -27,30 +24,13 @@
 
 -define(SERVER, ?MODULE).
 
-
--record(state, {
-  mc_ref = erlang:error() :: reference(),
-  rtt_entries = #{}
-}).
--record(rtt_entry, {
-  sent_timestamp = erlang:error() :: pos_integer(),
-  induced_delay = erlang:error() :: pos_integer(),
-  remote_timestamp = erlang:error() :: pos_integer(),
-  recv_timestamp = erlang:error() :: pos_integer()
-}).
-
--type state() :: #state{}.
-
-
--define(TICK_SECS, 300).
--define(MC_TOPIC_TICK, lashup_kv_tick).
-
+-record(state, {ref = erlang:error(), rolling_buffer = #{}}).
+-define(TICK_SECS, 10).
+-define(MC_TOPIC_NERVECENTER, nervecenter).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
-entries() ->
-  gen_server:call(?SERVER, entries).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -79,14 +59,12 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
+  {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  random:seed(lashup_utils:seed()),
-  {ok, Reference} = lashup_gm_mc_events:subscribe([?MC_TOPIC_TICK]),
-  reschedule_tick(5),
-  State = #state{mc_ref = Reference},
-  {ok, State}.
+
+  {ok, Ref} = lashup_hyparview_ping_events:subscribe(),
+  {ok, #state{ref = Ref}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -96,15 +74,13 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
-handle_call(entries, _From, State = #state{rtt_entries = Entries}) ->
-  {reply, Entries, State};
+  State :: #state{}) ->
+  {reply, Reply :: term(), NewState :: #state{}} |
+  {reply, Reply :: term(), NewState :: #state{}, timeout() | hibernate} |
+  {noreply, NewState :: #state{}} |
+  {noreply, NewState :: #state{}, timeout() | hibernate} |
+  {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
+  {stop, Reason :: term(), NewState :: #state{}}).
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
@@ -115,10 +91,10 @@ handle_call(_Request, _From, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
+-spec(handle_cast(Request :: term(), State :: #state{}) ->
+  {noreply, NewState :: #state{}} |
+  {noreply, NewState :: #state{}, timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: #state{}}).
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -132,19 +108,19 @@ handle_cast(_Request, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
+-spec(handle_info(Info :: timeout() | term(), State :: #state{}) ->
+  {noreply, NewState :: #state{}} |
+  {noreply, NewState :: #state{}, timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: #state{}}).
+handle_info({lashup_hyparview_ping_events, _Event = #{ref := Ref, ping_data := PingData}},
+    State = #state{ref = Ref, rolling_buffer = RollingBuffer}) ->
+  RollingBuffer1 = maps:merge(RollingBuffer, PingData),
+  {noreply, State#state{rolling_buffer = RollingBuffer1}};
 handle_info(tick, State) ->
   State1 = handle_tick(State),
   {noreply, State1};
-handle_info({lashup_gm_mc_event, _Event = #{origin := Origin, ref := Reference, payload := Payload}},
-    State = #state{mc_ref = Reference}) ->
-  State1 = handle_mc_event(Origin, Payload, State),
-  {noreply, State1};
-handle_info(Else, State) ->
-  lager:debug("Unknown info: ~p", [Else]),
+handle_info(Info, State) ->
+  lager:debug("Info: ~p", [Info]),
   {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -159,7 +135,7 @@ handle_info(Else, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
+  State :: #state{}) -> term()).
 terminate(_Reason, _State) ->
   ok.
 
@@ -171,15 +147,16 @@ terminate(_Reason, _State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
   Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
+  {ok, NewState :: #state{}} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
 
 reschedule_tick() ->
   TickTime = erlang:convert_time_unit(?TICK_SECS, seconds, milli_seconds),
@@ -191,46 +168,29 @@ reschedule_tick(Time) ->
   Delay = Multipler * Time,
   timer:send_after(Delay, tick).
 
-handle_tick(State) ->
+handle_tick(State = #state{rolling_buffer = RollingBuffer}) ->
   reschedule_tick(),
-  Payload = #{type => tick, system_time_ms => erlang:system_time(milli_seconds)},
-  lashup_gm_mc:multicast(?MC_TOPIC_TICK, Payload, [loop, {fanout, 1}]),
-  State.
+  disseminate_buffer(RollingBuffer),
+  State1 = State#state{rolling_buffer = #{}},
+  State1.
 
+disseminate_buffer(RB) ->
+  %% in native time units
+  %% {node => [{RecordedTime :: integer(), RTT :: integer()}]}
+  RB1 = maps:filter(fun filter_empty/2, RB),
+  RB2 = maps:map(fun rollup/2, RB1),
+  Payload = #{type => rollup, rollup => RB2},
+  lashup_gm_mc:multicast(?MC_TOPIC_NERVECENTER, Payload, [loop, {fanout, 1}]).
 
-handle_mc_event(Origin, _Event = #{type := tick, system_time_ms := OriginalTime}, State) ->
-  % Sleep up to 100seconds before replying
-  RandomSleep = trunc(random:uniform() * 100000),
-  Now = erlang:system_time(milli_seconds),
-  Reply = #{
-    type => tick_reply,
-    induced_delay => RandomSleep,
-    original_timestamp => OriginalTime,
-    node_timestamp => Now
-  },
-  MCOptions = [{only_nodes, [Origin]}, loop, {fanout, 1}],
-  timer:apply_after(RandomSleep, lashup_gm_mc, multicast, [?MC_TOPIC_TICK, Reply, MCOptions]),
-  State;
-handle_mc_event(Origin,
-    _Event =
-  #{
-    type := tick_reply,
-    original_timestamp := OriginalTimestamp,
-    induced_delay := InducedDelay,
-    node_timestamp := NodeTimestamp
-    },
-  State = #state{rtt_entries = RTTEntries}) ->
-  Now = erlang:system_time(milli_seconds),
-  Entry =
-  #rtt_entry{
-    sent_timestamp = OriginalTimestamp,
-    induced_delay = InducedDelay,
-    remote_timestamp = NodeTimestamp,
-    recv_timestamp = Now
-  },
-  Entries = maps:get(Origin, RTTEntries, []),
-  EntriesTruncated = lists:sublist(Entries, 99),
-  NewEntries = [Entry|EntriesTruncated],
-  RTTEntries1 = RTTEntries#{Origin => NewEntries},
-  State#state{rtt_entries = RTTEntries1}.
+filter_empty(_, []) -> false;
+filter_empty(_, _) -> true.
+
+rollup(_Key, Measurements) ->
+  RTTs = [erlang:convert_time_unit(RTT, native, milli_seconds) || {_, RTT} <-  Measurements],
+  SortedRTTs = lists:sort(RTTs),
+  Length = length(RTTs),
+  Median = lists:nth(round(Length/2), SortedRTTs),
+  Mean = round(lists:sum(RTTs) / Length),
+  #{mean => Mean, median => Median}.
+
 
