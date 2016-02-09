@@ -340,7 +340,6 @@ handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := Remot
 
 sync(Origin, LocalAAEData, RemoteAAEData) ->
   %% Prioritize merging MissingKeys over Divergent Keys.
-  lager:debug("Beginning AAE Sync local: ~p <~~~~~~~~~~~~~~> ~p", [maps:from_list(LocalAAEData), maps:from_list(RemoteAAEData)]),
   Keys = keys_to_sync(LocalAAEData, RemoteAAEData),
   lager:debug("Syncing keys: ~p", [Keys]),
   sync_keys(Origin, Keys).
