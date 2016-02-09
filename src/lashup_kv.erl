@@ -6,6 +6,10 @@
 %%% @end
 %%% Created : 07. Feb 2016 6:16 PM
 %%%-------------------------------------------------------------------
+
+%% TODO:
+%% -Add VClock pruning
+
 -module(lashup_kv).
 -author("sdhillon").
 
@@ -39,8 +43,13 @@
 -type actor_id() :: {Node :: node(), Uid :: integer()}.
 -record(state, {
   mc_ref = erlang:error() :: reference(),
-  actor_id = erlang:error() :: actor_id()
+  actor_id = erlang:error() :: actor_id(),
+  metadata_snapshot_current = [] :: metadata_snapshot(),
+  metadata_snapshot_next = [] :: metadata_snapshot()
 }).
+
+
+-type metadata_snapshot() :: [{key(), vclock:vclock()}].
 
 -record(kv, {
   key = erlang:error() :: key(),
@@ -95,8 +104,24 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  lashup_utils:wakeup_loop(aae_wakeup, lashup_utils:linear_ramp_up(fun lashup_config:aae_interval/0, 10)),
-  random:seed(lashup_utils:seed()),
+  rand:seed(exs1024),
+  ResolverConfig =
+    lashup_timers:wait(60000,
+      lashup_timers:linear_ramp_up(10,
+        lashup_timers:jitter_uniform(
+          fun lashup_config:aae_interval/0
+        ))),
+
+  lashup_timers:wakeup_loop(aae_wakeup, ResolverConfig),
+
+  lashup_timers:wakeup_loop(metadata_snapshot,
+    lashup_timers:jitter_uniform(
+      lashup_timers:linear_ramp_up(10,
+        lashup_timers:jitter_uniform(
+          10000
+    )))),
+
+  %% Maybe read_concurrency?
   ?MODULE = ets:new(?MODULE, [ordered_set, named_table, {keypos, #kv.key}]),
   {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
   ActorID = {node(), erlang:unique_integer()},
@@ -158,6 +183,9 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
 handle_info(aae_wakeup, State) ->
   State1 = handle_aae_wakeup(State),
   {noreply, State1};
+handle_info(metadata_snapshot, State) ->
+  State1 = handle_metadata_snapshot(State),
+  {noreply, State1};
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
@@ -201,6 +229,7 @@ op(Key, Op, State) ->
   KV = op_getkv(Key),
   chk_op(op_perform(KV, Op, State), State).
 
+%% TODO: Add metrics
 chk_op(OpStatus = {ok, NewKV = #kv{key = Key}, _Delta}, State) ->
   case erlang:external_size(NewKV) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
@@ -210,6 +239,8 @@ chk_op(OpStatus = {ok, NewKV = #kv{key = Key}, _Delta}, State) ->
       commit_op(OpStatus, State);
     Size when Size > ?WARN_OBJECT_SIZE_KB * 10000 ->
       lager:warning("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
+      commit_op(OpStatus, State);
+    _ ->
       commit_op(OpStatus, State)
   end.
 
@@ -273,71 +304,130 @@ handle_delta_update_write(KV = #kv{map = Map, vclock = LocalVClock}, RemoteVCloc
   KV1 = KV#kv{map = Map1, vclock = VClock1},
   ets:insert(?MODULE, KV1).
 
-handle_full_update(Payload = #{key := Key, vclock := VClock, map := Map}, State) ->
+handle_full_update(_Payload = #{key := Key, vclock := VClock, map := Map}, State) ->
   KV = op_getkv(Key),
-  lager:debug("Full update: ~p", [Payload]),
   Map1 = riak_dt_delta_map:merge(Map, KV#kv.map),
   VClock1 =  vclock:merge([VClock, KV#kv.vclock]),
   KV1 = KV#kv{map = Map1, vclock = VClock1},
   ets:insert(?MODULE, KV1),
   State.
 
-
-handle_aae_wakeup(State) ->
+aae_snapshot() ->
   MatchSpec = ets:fun2ms(fun(#kv{key = Key, vclock = VClock}) -> {Key, VClock}  end),
-  AAEData = ets:select(?MODULE, MatchSpec),
+  KeyClocks = ets:select(?MODULE, MatchSpec),
+  orddict:from_list(KeyClocks).
+
+% @doc This is the function that gets called to begin the AAE process
+
+%% We send out a set of all our {key, VClock} pairs
+handle_aae_wakeup(State) ->
+  lager:debug("Beginning AAE LUB announcement"),
+  AAEData = aae_snapshot(),
   Payload = #{type => lub_advertise, aae_data => AAEData},
   lashup_gm_mc:multicast(?MODULE, Payload, [{ttl, 1}, {fanout, 1}]),
   State.
 
 %% @private This is an "AAE Event" It is to advertise all of the keys from a given node
-handle_lub_advertise(Event = #{origin := Origin, payload := #{aae_data := AAEData}}, State) ->
-  sync_missing_keys(Origin, AAEData),
-  sync_divergent_keys(Origin, AAEData),
+
+%% The metrics snapshot is empty. We will skip this round of responding to AAE.
+handle_lub_advertise(_Event, State = #state{metadata_snapshot_current = []}) ->
+  State;
+handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := RemoteAAEData}},
+    State = #state{metadata_snapshot_current = LocalAAEData}) ->
+  sync(Origin, LocalAAEData, RemoteAAEData),
   %% Add vector clock divergence check
   State.
 
-%% This sends the missing keys
-sync_missing_keys(Origin, AAEData) ->
-  AAEDataSet = orddict:from_list(AAEData),
-  KVs =
-  qlc:eval(
-    qlc:q(
-      [KV || KV = #kv{key = Key} <- ets:table(?MODULE), not orddict:is_key(Key, AAEDataSet)]
-    )
-  ),
-  ShuffledList = lashup_utils:shuffle_list(KVs, lashup_utils:seed()),
-  TruncatedShuffledList = lists:sublist(ShuffledList, ?MAX_AAE_REPLIES),
-  [sync_missing_key(Origin, KV) || KV <- TruncatedShuffledList].
+sync(Origin, LocalAAEData, RemoteAAEData) ->
+  %% Prioritize merging MissingKeys over Divergent Keys.
+  lager:debug("Beginning AAE Sync local: ~p <~~~~~~~~~~~~~~> ~p", [maps:from_list(LocalAAEData), maps:from_list(RemoteAAEData)]),
+  Keys = keys_to_sync(LocalAAEData, RemoteAAEData),
+  lager:debug("Syncing keys: ~p", [Keys]),
+  sync_keys(Origin, Keys).
+
+sync_keys(Origin, KeyList) ->
+  KVs = [op_getkv(Key) || Key <- KeyList],
+  [sync_key(Origin, KV) || KV <- KVs].
+
+keys_to_sync(LocalAAEData, RemoteAAEData) ->
+  MissingKeys = missing_keys(LocalAAEData, RemoteAAEData),
+  lager:debug("Adding missing keys to sync: ~p", [MissingKeys]),
+  keys_to_sync(MissingKeys, LocalAAEData, RemoteAAEData).
+
+keys_to_sync(MissingKeys, _LocalAAEData, _RemoteAAEData)
+    when length(MissingKeys) > ?MAX_AAE_REPLIES ->
+  MissingKeys;
+keys_to_sync(MissingKeys, LocalAAEData, RemoteAAEData) ->
+  DivergentKeys = divergent_keys(LocalAAEData, RemoteAAEData),
+  lager:debug("Adding divergent keys to sync: ~p", [DivergentKeys]),
+  Keys = ordsets:union(MissingKeys, DivergentKeys),
+  keys_to_sync(Keys).
+
+keys_to_sync(Keys) ->
+  Shuffled = lashup_utils:shuffle_list(Keys),
+  lists:sublist(Shuffled, ?MAX_AAE_REPLIES).
+
 
 %% TODO: Add backpressure
 %% TODO: Add jitter to avoid overwhelming the node we're
-sync_missing_key(Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
+sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
-  SendAfter = trunc(random:uniform() * 10000),
+  SendAfter = trunc(rand:uniform() * 10000),
   %% Maybe remove {only_nodes, [Origin]} from MCOpts
   %% to generate more random gossip
-  %% The reason ttl = 2 is here is to ensure the update gets back
-  MCOpts = [{ttl, 2}, {fanout, 1}, {only_nodes, [Origin]}],
+  %% Think about adding: {only_nodes, [Origin]}
+
+  %% So, it's likely that this update will go the 6 nodes near me.
+  %% They can then AAE across the cluster.
+  %% Given this, "convergence" is the period time * the diameter of the network
+  %% We've setup the network to have diameters of <10. The default AAE timeout is 5-10 minutes
+  %% So, convergence is about ~1 hour for the K/V store assuming worst case scenario
+
+  %% One of the ideas is to allow the LUB advertisements to fan out throughout the network.
+  %% Catching up can be done optimistically (I received a new version of this object via AAE)
+  %% and I think my neighbor hasn't seen it because of the last advertisement.
+  %% Allowing this to cascade throughout. But systems that cascade uncontrollably
+  %% are complicated and prone to failure
+
+  %% Another idea is to use the routing database to elect a root for the network
+  %% The leader doesn't need to be strongly consistent, just weakly, and we can
+  %% send LUB announcements to that node, and have it deal with global AAE
+  %% -Sargun Dhillon
+  %% 2/9/2016
+
+  MCOpts = [{ttl, 1}, {fanout, 1}],
   timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts]).
 
-sync_divergent_keys(Origin, AAEData) ->
-  AAEKVs =
-    qlc:eval(
-      qlc:q(
-        [{KV, AAEVClock} ||
-          KV = #kv{key = Key, vclock = VClock} <- ets:table(?MODULE),
-          {AAEKey, AAEVClock} = _AAEKeyData <- AAEData,
-          Key == AAEKey andalso VClock =/= AAEVClock andalso not vclock:equal(VClock, AAEVClock)
-        ]
+
+%% This finds the missing keys from the remote data
+missing_keys(LocalAAEData, RemoteAAEData) ->
+  RemoteAAEDataDict = orddict:from_list(RemoteAAEData),
+  LocalAAEDataDict = orddict:from_list(LocalAAEData),
+  RemoteAAEDataSet = ordsets:from_list(orddict:fetch_keys(RemoteAAEDataDict)),
+  LocalAAEDataSet = ordsets:from_list(orddict:fetch_keys(LocalAAEDataDict)),
+  ordsets:subtract(LocalAAEDataSet, RemoteAAEDataSet).
+
+%% The logic goes here:
+%% 1. We must be comparing the same key
+%% 2. The literal erlang datastructures for the clocks must not be the same
+%% 3. The logical datastructures must not be equivalent
+%% 3a. If I descend from the remote vector clock, I win orelse
+%% 3b. If the remote vector clock does not descend from me, I win (concurrency)
+
+
+%% descends(A, B) andalso not descends(B, A).
+divergent_keys(LocalAAEData, RemoteAAEData) ->
+  [ LocalKey ||
+    {LocalKey, LocalClock} <- LocalAAEData,
+    {RemoteKey, RemoteClock} <- RemoteAAEData,
+    LocalKey == RemoteKey,
+    LocalClock =/= RemoteClock
+      andalso (not vclock:equal(LocalClock, RemoteClock))
+      andalso (
+        vclock:descends(LocalClock, RemoteClock) orelse
+        not vclock:descends(RemoteClock, LocalClock)
       )
-    ),
-  %% So, we have to be careful here because we can come up with divergence during periods of rapid updates
-  %% Although
-  [do_sync_divergent_keys(Origin, AAEKV) ||
-    AAEKV <- AAEKVs,
-    sync_divergent_key_actors(AAEKV) orelse sync_divergent_key_clocks(AAEKV)].
+    ].
 
-do_sync_divergent_keys(_Origin, AAEKV = {_KV, _RemoteClock}) ->
-  lager:debug("Maybe syncing divergence key: ~p", [AAEKV]).
-
+handle_metadata_snapshot(State = #state{metadata_snapshot_next = MSN}) ->
+  State#state{metadata_snapshot_current = MSN, metadata_snapshot_next = aae_snapshot()}.
