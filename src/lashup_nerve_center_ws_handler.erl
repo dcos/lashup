@@ -34,10 +34,6 @@ websocket_init(_Type, Req, _Opts) ->
 websocket_handle({text, Msg}, Req, State) ->
   Data = jsx:decode(Msg, [return_maps]),
   case handle_msg(Data, State) of
-    {reply, Reply = {text, _}, State1} ->
-      {reply, Reply, Req, State1};
-    {reply, ReplyBinary, State1} when is_binary(ReplyBinary) ->
-      {reply, {text, ReplyBinary}, Req, State1};
     {reply, Reply, State1} ->
       Reply1 = {text, jsx:encode(Reply)},
       {reply, Reply1, Req, State1}
@@ -50,10 +46,6 @@ websocket_info({timeout, _Ref, Msg}, Req, State) ->
   {reply, {text, Msg}, Req, State};
 websocket_info(Info, Req, State) ->
   case handle_info(Info, State) of
-    {reply, Reply = {text, _}, State1} ->
-      {reply, Reply, Req, State1};
-    {reply, ReplyBinary, State1} when is_binary(ReplyBinary) ->
-      {reply, {text, ReplyBinary}, Req, State1};
     {reply, Replies, State1} when is_list(Replies) ->
       Reply = [{text, jsx:encode(Reply)} || Reply <- Replies] ,
       {reply, Reply, Req, State1};

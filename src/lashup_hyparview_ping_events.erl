@@ -196,5 +196,6 @@ code_change(_OldVsn, State, _Extra) ->
 -spec(handle_ingest(term(), state()) -> ok).
 handle_ingest(PingData, _State = #state{reference = Reference, pid = Pid}) ->
   Event = #{ping_data => PingData, ref => Reference},
-  Pid ! {?MODULE, Event}.
+  Pid ! {?MODULE, Event},
+  ok.
 

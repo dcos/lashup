@@ -206,12 +206,15 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 -spec(handle_ingest(member(), state()) -> ok).
-handle_ingest(Member, _State = #state{reference = Reference, pid = Pid}) ->
+handle_ingest(Member = #member{}, _State = #state{reference = Reference, pid = Pid}) ->
   Event = #{type => new_member, member => Member, ref => Reference},
-  Pid ! {?MODULE, Event}.
+  Pid ! {?MODULE, Event},
+  ok.
 
 -spec(handle_ingest(member(), member(), state()) -> ok).
-handle_ingest(OldMember, NewMember, _State = #state{reference = Reference, pid = Pid}) ->
+handle_ingest(OldMember = #member{}, NewMember = #member{},
+    _State = #state{reference = Reference, pid = Pid}) ->
   Event = #{type => member_change, old_member => OldMember, member => NewMember, ref => Reference},
-  Pid ! {?MODULE, Event}.
+  Pid ! {?MODULE, Event},
+  ok.
 
