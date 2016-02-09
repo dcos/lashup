@@ -54,7 +54,7 @@ ingest(Member) ->
 %% @doc
 %% Subscribes a process to zero or more topics
 %% Processes then get messages like:
-%% {@module, #{ref => Reference, payload => Payload}}
+%% {{@module}, #{ref => Reference, payload => Payload}}
 %% @end
 -spec(subscribe() -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
 subscribe() ->

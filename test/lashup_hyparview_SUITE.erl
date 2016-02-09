@@ -29,16 +29,20 @@ all() ->
 init_per_testcase(TestCaseName, Config) ->
   ct:pal("Starting Testcase: ~p", [TestCaseName]),
   {Masters, Slaves} = start_nodes(),
-  [{masters, Masters}, {slaves, Slaves} | Config].
+  {Pids, _} = rpc:multicall(Masters ++ Slaves, os, getpid, []),
+  Config1 = proplists:delete(pid, Config),
+  [{masters, Masters}, {slaves, Slaves}, {pids, Pids} | Config1].
 
 
-end_per_testcase(ping_test, _Config) ->
+end_per_testcase(ping_test, Config) ->
   os:cmd("pkill -CONT -f beam.smp"),
   stop_nodes(slaves()),
-  stop_nodes(masters());
-end_per_testcase(_, _Config) ->
+  stop_nodes(masters()),
+  [os:cmd(io_lib:format("kill -9 ~s", [Pid])) || Pid <- ?config(pids, Config)];
+end_per_testcase(_, Config) ->
   stop_nodes(slaves()),
-  stop_nodes(masters()).
+  stop_nodes(masters()),
+  [os:cmd(io_lib:format("kill -9 ~s", [Pid])) || Pid <- ?config(pids, Config)].
 
 slaves() ->
   %% This is about the highest a Circle-CI machine can handle

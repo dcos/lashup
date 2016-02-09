@@ -61,7 +61,7 @@ jitter_uniform(Factor, TimerResolver) when Factor > 1 ->
     Multiplier * (to_function_with_arity(1, TimerResolver))(Count)
   end.
 
-%% @doc Like {@jitter/2}, but with a default Factor of 2.
+%% @doc Like jitter_uniform(2, TimerResolver)
 jitter_uniform(TimerResolver) ->
   jitter_uniform(2, TimerResolver).
 
