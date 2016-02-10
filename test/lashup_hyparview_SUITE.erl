@@ -190,6 +190,18 @@ kill_nodes(Config, Remaining) ->
   timer:sleep(5000),
   kill_nodes(Config, Remaining - 1).
 
+% @doc how long to wait between each ping unreachability test, in ms
+%% We want to do 1 minute on CI
+%% And 5 seconds on a local test (for speed)
+
+ping_wait_time() ->
+  case ci() of
+    true ->
+      60000;
+    false ->
+      5000
+  end.
+
 ping_test(Config) ->
   hyparview_test(Config),
   timer:sleep(60000),
@@ -214,7 +226,7 @@ stop_start_nodes(Config, Remaining) ->
   UnKillCmd = io_lib:format("kill -CONT ~s", [KillNodePid]),
   ct:pal("UnKill: ~s", [os:cmd(UnKillCmd)]),
   wait_for_convergence(600000, 5000, AllNodes),
-  timer:sleep(5000),
+  timer:sleep(ping_wait_time()),
   stop_start_nodes(Config, Remaining - 1).
 
 
