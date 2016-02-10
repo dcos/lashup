@@ -18,12 +18,12 @@
 
 
 all() ->
-  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test, failure_test0, failure_test60],
+  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test],
   case ci() of
     true ->
       BaseTests ++ [failure_test300];
     false ->
-      BaseTests
+      BaseTests ++ [failure_test0, failure_test60]
   end.
 
 init_per_testcase(TestCaseName, Config) ->
