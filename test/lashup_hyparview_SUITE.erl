@@ -36,13 +36,12 @@ init_per_testcase(TestCaseName, Config) ->
 
 end_per_testcase(ping_test, Config) ->
   os:cmd("pkill -CONT -f beam.smp"),
-  stop_nodes(slaves()),
-  stop_nodes(masters()),
-  [os:cmd(io_lib:format("kill -9 ~s", [Pid])) || Pid <- ?config(pids, Config)];
+  stop_nodes(?config(slaves, Config)),
+  stop_nodes(?config(masters, Config));
+
 end_per_testcase(_, Config) ->
-  stop_nodes(slaves()),
-  stop_nodes(masters()),
-  [os:cmd(io_lib:format("kill -9 ~s", [Pid])) || Pid <- ?config(pids, Config)].
+  stop_nodes(?config(slaves, Config)),
+  stop_nodes(?config(masters, Config)).
 
 slaves() ->
   %% This is about the highest a Circle-CI machine can handle
@@ -108,9 +107,51 @@ maybe_kill(Node) ->
       ok
   end.
 
+%% Borrowed from the ct_slave module
+do_stop(ENode) ->
+  Cover = stop_cover_enode(ENode),
+  spawn(ENode, init, stop, []),
+  case wait_for_node_dead(ENode, 60) of
+    {ok, ENode} ->
+      maybe_signal_cover_master(ENode, Cover),
+      {ok, ENode};
+    Error ->
+      Error
+  end.
+
+stop_cover_enode(ENode) ->
+  case test_server:is_cover() of
+    true ->
+      Main = cover:get_main_node(),
+      rpc:call(Main, cover, flush, [ENode]),
+      {true, Main};
+    false ->
+      {false, undefined}
+  end.
+
+%% To avoid that cover is started again if a node
+%% with the same name is started later.
+maybe_signal_cover_master(ENode, {true, MainCoverNode}) ->
+  rpc:call(MainCoverNode, cover, stop, [ENode]);
+maybe_signal_cover_master(_, {false, _}) ->
+  ok.
+
+% wait until timeout N seconds until node is disconnected
+% relies on disterl to tell us if a node has died
+% Maybe we should net_adm:ping?
+wait_for_node_dead(Node, 0) ->
+  {error, stop_timeout, Node};
+wait_for_node_dead(Node, N) ->
+  timer:sleep(1000),
+  case lists:member(Node, nodes()) of
+    true->
+      wait_for_node_dead(Node, N-1);
+    false->
+      {ok, Node}
+  end.
+
 stop_nodes(Nodes) ->
-  gen_server:multi_call(Nodes, lashup_hyparview_membership, stop),
-  StoppedResult = [ct_slave:stop(Node) || Node <- Nodes],
+  StoppedResult = [do_stop(Node) || Node <- Nodes],
   ct:pal("Stopped result: ~p", [StoppedResult]),
   [maybe_kill(Node) || Node <- Nodes].
 
