@@ -346,25 +346,23 @@ aae_snapshot() ->
 %% We send out a set of all our {key, VClock} pairs
 -spec(handle_aae_wakeup(state()) -> state()).
 handle_aae_wakeup(State) ->
-  lager:debug("Beginning AAE LUB announcement: ~p", [State]),
   aae_controlled_snapshot([State#state.last_selected_key], State).
 
-
-
-
+%% We have more than ?AAE_LUB_LIMIT keys
 aae_controlled_snapshot(Acc, State) when length(Acc) >= ?AAE_LUB_LIMIT  ->
   aae_begin_end(Acc, State);
+%% The table is empty
 aae_controlled_snapshot(['$end_of_table', '$end_of_table'], State) ->
   aae_begin_end([], State);
+%% We're having to reset to the beginning of the table - because the first key that was put in there was end of table
 aae_controlled_snapshot(Acc = ['$end_of_table'], State) ->
-  lager:debug("meep"),
   Key = ets:first(?MODULE),
   aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key});
+%% We've hit the end of the table
 aae_controlled_snapshot(Acc = ['$end_of_table'| _RestKeys], State) ->
-  lager:debug("Springing out because early end of table"),
   aae_begin_end(Acc, State);
+%% We're still traversing the table
 aae_controlled_snapshot(Acc = [PreviousKey|_], State) ->
-  lager:debug("merp"),
   Key = ets:next(?MODULE, PreviousKey),
   aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key}).
 
@@ -407,7 +405,6 @@ handle_lub_advertise(_Event, State = #state{metadata_snapshot_current = []}) ->
   State;
 handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := RemoteAAEData} = Payload},
     State = #state{metadata_snapshot_current = LocalAAEData}) ->
-  lager:debug("Lubbin(~p): ~p", [Origin, Payload]),
   LocalAAEData1 = trim_local_aae_data(LocalAAEData, Payload),
   sync(Origin, LocalAAEData1, RemoteAAEData),
   %% Add vector clock divergence check
@@ -443,7 +440,6 @@ sync_keys(Origin, KeyList) ->
 -spec(keys_to_sync(aae_data(), aae_data()) -> keys()).
 keys_to_sync(LocalAAEData, RemoteAAEData) ->
   MissingKeys = missing_keys(LocalAAEData, RemoteAAEData),
-  lager:debug("Adding missing keys to sync: ~p", [MissingKeys]),
   keys_to_sync(MissingKeys, LocalAAEData, RemoteAAEData).
 
 -spec(keys_to_sync(keys(), aae_data(), aae_data()) -> keys()).
@@ -452,7 +448,6 @@ keys_to_sync(MissingKeys, _LocalAAEData, _RemoteAAEData)
   MissingKeys;
 keys_to_sync(MissingKeys, LocalAAEData, RemoteAAEData) ->
   DivergentKeys = divergent_keys(LocalAAEData, RemoteAAEData),
-  lager:debug("Adding divergent keys to sync: ~p", [DivergentKeys]),
   Keys = ordsets:union(MissingKeys, DivergentKeys),
   keys_to_sync(Keys).
 
