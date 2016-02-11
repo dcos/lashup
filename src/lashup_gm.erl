@@ -7,6 +7,9 @@
 %%% Created : 15. Jan 2016 2:56 AM
 %%%-------------------------------------------------------------------
 
+%% TODO: Move to use dvvset rather than our own vclock madness
+
+
 -module(lashup_gm).
 -author("sdhillon").
 

@@ -10,7 +10,7 @@
 -author("sdhillon").
 
 -export([wakeup_loop/2, loop_calculate_time/1, linear_ramp_up/2, wait/2, jitter_uniform/2, jitter_uniform/1,
-  time_remaining/1, cancel/1, limit_count/2]).
+  time_remaining/1, cancel/1, limit_count/2, reset/1, skip/1]).
 
 
 -ifdef(TEST).
@@ -30,6 +30,16 @@
 
 -type lashup_timer() :: #lashup_timer{}.
 -type timer_resolver() :: integer() | fun(() -> integer()) |fun(((Count :: pos_integer())) -> integer()).
+-export_type([lashup_timer/0]).
+
+
+reset(#lashup_timer{pid = Pid}) ->
+  reset ! Pid.
+
+
+skip(#lashup_timer{pid = Pid}) ->
+  skip ! Pid.
+
 
 cancel(#lashup_timer{pid = Pid}) ->
   Pid ! cancel.
@@ -58,14 +68,17 @@ wakeup_loop(Message, TimeResolver) ->
 
 loop_calculate_time(State = #wakeup_loop{count = Count, resolver = TimeResolver}) ->
   SleepTime = (to_function_with_arity(1, TimeResolver))(Count),
-  WhenToFire = erlang:monotonic_time() + SleepTime,
+  WhenToFire = erlang:monotonic_time(milli_seconds) + SleepTime,
   loop_sleep(WhenToFire, State).
 
-loop_sleep(WhenToFire, State = #wakeup_loop{pid = Pid}) ->
-  NativeToFireIn = round(WhenToFire - erlang:monotonic_time()),
-  MSToFireIn = erlang:convert_time_unit(NativeToFireIn, native, milli_seconds),
+loop_sleep(WhenToFire, State = #wakeup_loop{pid = Pid, count = Count}) ->
+  MSToFireIn = round(WhenToFire - erlang:monotonic_time(milli_seconds)),
   TimeRemaining = max(0, MSToFireIn),
   receive
+    reset ->
+      loop_calculate_time(State);
+    skip ->
+      loop_calculate_time(State#wakeup_loop{count = Count + 1});
     cancel ->
       unlink(Pid);
     #report_time{} = ReportTime ->
@@ -106,7 +119,7 @@ linear_ramp_up(RampupPeriod, TimerResolver) ->
 wait(WaitTime, TimerResolver) when WaitTime > 0 ->
   fun
     (1) ->
-      erlang:convert_time_unit(WaitTime, milli_seconds, native);
+      WaitTime;
     (Count) ->
       (to_function_with_arity(1, TimerResolver))(Count - 1)
   end.
@@ -139,9 +152,10 @@ jitter_uniform(TimerResolver) ->
 %% It just drops the arguments
 %% There is probably a better way to do this, but alas
 to_function_with_arity(Arity, Time)  when is_integer(Time) ->
-  to_function_with_arity(Arity, fun() -> erlang:convert_time_unit(Time, milli_seconds, native) end);
+  to_function_with_arity(Arity, fun() -> Time end);
 to_function_with_arity(Arity, Function) when is_function(Function, Arity) ->
   Function;
+%% This is for configuration functions and the like
 to_function_with_arity(1, Function) when is_function(Function, 0) ->
   fun(_) ->
     Function()

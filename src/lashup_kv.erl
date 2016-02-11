@@ -35,6 +35,8 @@
 
 -define(SERVER, ?MODULE).
 -define(MAX_AAE_REPLIES, 10).
+%% What's the maximum number of lubs to advertise
+-define(AAE_LUB_LIMIT, 100).
 
 -define(WARN_OBJECT_SIZE_KB, 25).
 -define(REJECT_OBJECT_SIZE_KB, 100).
@@ -45,7 +47,8 @@
   mc_ref = erlang:error() :: reference(),
   actor_id = erlang:error() :: actor_id(),
   metadata_snapshot_current = [] :: metadata_snapshot(),
-  metadata_snapshot_next = [] :: metadata_snapshot()
+  metadata_snapshot_next = [] :: metadata_snapshot(),
+  last_selected_key = '$end_of_table' :: '$end_of_table' | key()
 }).
 
 
@@ -108,6 +111,8 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   rand:seed(exs1024),
+
+  %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
     lashup_timers:wait(60000,
       lashup_timers:linear_ramp_up(10,
@@ -115,12 +120,12 @@ init([]) ->
           fun lashup_config:aae_interval/0
         )))),
 
+  %% Take snapshots faster in the beginning than in running state, then every 10s
   lashup_timers:wakeup_loop(metadata_snapshot,
     lashup_timers:jitter_uniform(
       lashup_timers:linear_ramp_up(10,
-        lashup_timers:jitter_uniform(
           10000
-    )))),
+    ))),
 
   %% Maybe read_concurrency?
   ?MODULE = ets:new(?MODULE, [ordered_set, named_table, {keypos, #kv.key}]),
@@ -204,7 +209,8 @@ handle_info(Info, State) ->
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
   State :: state()) -> term()).
-terminate(_Reason, _State) ->
+terminate(Reason, State) ->
+  lager:debug("Terminating for reason: ~p, in state: ~p", [Reason, lager:pr(State, ?MODULE)]),
   ok.
 
 %%--------------------------------------------------------------------
@@ -334,28 +340,92 @@ aae_snapshot() ->
   KeyClocks = ets:select(?MODULE, MatchSpec),
   orddict:from_list(KeyClocks).
 
+
 % @doc This is the function that gets called to begin the AAE process
 
 %% We send out a set of all our {key, VClock} pairs
 -spec(handle_aae_wakeup(state()) -> state()).
 handle_aae_wakeup(State) ->
-  lager:debug("Beginning AAE LUB announcement"),
-  AAEData = aae_snapshot(),
-  Payload = #{type => lub_advertise, aae_data => AAEData},
-  lashup_gm_mc:multicast(?MODULE, Payload, [{ttl, 1}, {fanout, 1}]),
-  State.
+  lager:debug("Beginning AAE LUB announcement: ~p", [State]),
+  aae_controlled_snapshot([State#state.last_selected_key], State).
 
-%% @private This is an "AAE Event" It is to advertise all of the keys from a given node
+
+
+
+aae_controlled_snapshot(Acc, State) when length(Acc) >= ?AAE_LUB_LIMIT  ->
+  aae_begin_end(Acc, State);
+aae_controlled_snapshot(['$end_of_table', '$end_of_table'], State) ->
+  aae_begin_end([], State);
+aae_controlled_snapshot(Acc = ['$end_of_table'], State) ->
+  lager:debug("meep"),
+  Key = ets:first(?MODULE),
+  aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key});
+aae_controlled_snapshot(Acc = ['$end_of_table'| _RestKeys], State) ->
+  lager:debug("Springing out because early end of table"),
+  aae_begin_end(Acc, State);
+aae_controlled_snapshot(Acc = [PreviousKey|_], State) ->
+  lager:debug("merp"),
+  Key = ets:next(?MODULE, PreviousKey),
+  aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key}).
+
+%% Empty table
+
+aae_begin_end([], State) ->
+  aae_advertise_data(#{aae_data => []}, State);
+aae_begin_end(['$end_of_table'], State) ->
+  aae_advertise_data(#{aae_data => []}, State);
+aae_begin_end(Keys = [LastKey|_RestKeys], State) ->
+  [FirstKey|_] = SortedKeys = lists:reverse(Keys),
+  Records = [{Key, ets:lookup_element(?MODULE, Key, #kv.vclock)} || Key <- SortedKeys, Key =/= '$end_of_table'],
+  aae_begin_end(FirstKey, LastKey, Records, State).
+
+%% We iterated through the entire table
+aae_begin_end('$end_of_table', '$end_of_table', Records, State = #state{last_selected_key = '$end_of_table'}) ->
+  aae_advertise_data(#{aae_data => Records}, State);
+
+%% We started at the beginning of the table, and got to the middle
+aae_begin_end('$end_of_table', LastKey, Records, State) ->
+  aae_advertise_data(#{aae_data => Records, end_key => LastKey}, State);
+
+%% We started in the middle and ended at the end
+aae_begin_end(FirstKey, '$end_of_table', Records, State) ->
+  aae_advertise_data(#{aae_data => Records, start_key => FirstKey}, State);
+
+%% We started in the middle and ended at the middle
+aae_begin_end(FirstKey, LastKey, Records, State) ->
+  aae_advertise_data(#{aae_data => Records, start_key => FirstKey, end_key => LastKey}, State).
+
+aae_advertise_data(Payload, State) ->
+  Payload1 = Payload#{type => lub_advertise},
+  lager:debug("Multicasting: ~p", [Payload1]),
+  lashup_gm_mc:multicast(?MODULE, Payload1, [{ttl, 1}, {fanout, 1}]),
+  State.
 
 %% The metrics snapshot is empty. We will skip this round of responding to AAE.
 -spec(handle_lub_advertise(map(), state()) -> state()).
 handle_lub_advertise(_Event, State = #state{metadata_snapshot_current = []}) ->
   State;
-handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := RemoteAAEData}},
+handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := RemoteAAEData} = Payload},
     State = #state{metadata_snapshot_current = LocalAAEData}) ->
-  sync(Origin, LocalAAEData, RemoteAAEData),
+  lager:debug("Lubbin(~p): ~p", [Origin, Payload]),
+  LocalAAEData1 = trim_local_aae_data(LocalAAEData, Payload),
+  sync(Origin, LocalAAEData1, RemoteAAEData),
   %% Add vector clock divergence check
   State.
+
+-spec(trim_local_aae_data(aae_data(), map()) -> aae_data()).
+trim_local_aae_data(LocalAAEData, #{start_key := StartKey, end_key := EndKey}) ->
+  [Entry || Entry = {Key, _} <- LocalAAEData,
+    Key >= StartKey,
+    Key =< EndKey];
+trim_local_aae_data(LocalAAEData, #{start_key := StartKey}) ->
+  [Entry || Entry = {Key, _} <- LocalAAEData,
+    Key >= StartKey];
+trim_local_aae_data(LocalAAEData, #{end_key := EndKey}) ->
+  [Entry || Entry = {Key, _} <- LocalAAEData,
+    Key =< EndKey];
+trim_local_aae_data(LocalAAEData, _) ->
+  LocalAAEData.
 
 -spec(sync(node(), aae_data(), aae_data()) -> ok).
 sync(Origin, LocalAAEData, RemoteAAEData) ->

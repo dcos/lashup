@@ -47,7 +47,10 @@
          all_nodes/1,
          equal/2,
          prune/3,
-         timestamp/0]).
+         timestamp/0,
+         pure/1,
+         fix_time/1,
+         fix_time/2]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -105,6 +108,22 @@ descends_dot(Vclock, Dot) ->
 -spec pure_dot(dot()) -> pure_dot().
 pure_dot({N, {C, _TS}}) ->
     {N, C}.
+
+%% @doc Fix time sets the timestamps on all of the dots in the vclock to 0
+-spec(fix_time(vclock()) -> vclock()).
+fix_time(VClock) ->
+  fix_time(0, VClock).
+
+%% @doc Fix time sets the timestamps on all of the dots in the vclock to a specific value
+-spec(fix_time(NewTimestamp :: timestamp(), vclock()) -> vclock()).
+fix_time(NewTimestamp, VClock) ->
+  [{Node, {Counter, NewTimestamp}} || {Node, {Counter, _Timestamp}} <- VClock].
+
+%% @doc Returns the vclock as a set of pure dots
+-spec(pure(vclock()) -> [pure_dot()]).
+pure(VClock) ->
+  [{Node, Counter} || {Node, {Counter, _Timestamp}} <- VClock].
+
 
 %% @doc true if `A' strictly dominates `B'. Note: ignores
 %% timestamps. In Riak it is possible to have vclocks that are
@@ -261,6 +280,7 @@ get_property(Key, PairList) ->
       false ->
         undefined
     end.
+
 
 %% ===================================================================
 %% EUnit tests

@@ -395,6 +395,7 @@ handle_delete_node(Node, State) ->
   ets:select_delete(edges, MatchSpec2),
   update_local_tree(State).
 
+%% TODO: Maybe we should fire an event here for reachability data?
 update_local_tree(State) ->
   Root = node(),
   NewCacheVersion = State#state.cache_version + 1,
