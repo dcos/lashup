@@ -78,6 +78,7 @@ forward_event(Event, State = #state{receiver = Receiver}) ->
 %% We have to send out full list of [{Node, VClock}] list to this pid
 %% In return it filters the one that it has newer vclocks for
 %% And sends them back
+%% TODO: Monitor / link against the sync worker
 aae_keys(#{pid := Pid}, State) ->
   NodeClocks = node_clocks(),
   [Pid ! #{type => node_clock, node_clock => NodeClock} || NodeClock <- NodeClocks],
@@ -88,8 +89,9 @@ aae_keys(#{pid := Pid}, State) ->
 node_clocks() ->
   MatchSpec = ets:fun2ms(
     fun(Member) ->
-      {Member#member.node, Member#member.vclock}
+      {Member#member.node, Member#member.dvvset}
     end
   ),
-  NodeClocks = ets:select(members, MatchSpec),
+  NodeDVVs = ets:select(members, MatchSpec),
+  NodeClocks = [{Node, dvvset:join(DVVSet)} || {Node, DVVSet} <- NodeDVVs],
   orddict:from_list(NodeClocks).

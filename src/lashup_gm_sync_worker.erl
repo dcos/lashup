@@ -84,16 +84,17 @@ handle_node_clock(_NodeClock = #{node_clock := {Node, VClock}},
     State;
   [Member] ->
     State1 = State#state{nodes_checked = [Node|NodeChecked]},
-    case lashup_utils:compare_vclocks(Member#member.vclock, VClock) of
-      lt ->
-        State1;
-      equal ->
-        State1;
-      _ ->
+    MemberVClock = dvvset:join(Member#member.dvvset),
+    lager:debug("Local, Remote: ~p, ~p", [MemberVClock, VClock]),
+    case {dvvset:less(VClock, MemberVClock), dvvset:less(MemberVClock, VClock)} of
+      {true, false} ->
+        lager:debug("Syncing: ~p", [Key]),
         UpdatedNode = to_event(Member),
         CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
         erlang:send(Pid, {event, CompressedTerm}, [noconnect]),
-        State1
+        State1;
+      _ ->
+        State
     end
   end.
 
@@ -113,9 +114,6 @@ to_event(Member = #member{}) ->
   #{
     message => updated_node,
     node => Member#member.node,
-    node_clock => Member#member.node_clock,
-    vclock => Member#member.vclock,
-    ttl => 1,
-    active_view => Member#member.active_view,
-    metadata => Member#member.metadata
+    dvvset => Member#member.dvvset,
+    ttl => 1
   }.
