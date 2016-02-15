@@ -11,6 +11,8 @@
 
 -behaviour(gen_server).
 
+-dialyzer(no_improper_lists).
+
 %% API
 -export([start_link/0]).
 

@@ -12,10 +12,24 @@
 -compile(export_all).
 
 -include_lib("common_test/include/ct.hrl").
--export([all/0, init_per_testcase/2, end_per_testcase/2]).
+-export([all/0, init_per_testcase/2, end_per_testcase/2, init_per_suite/1, end_per_suite/1]).
 -export([hyparview_test/1, failure_test0/1, failure_test60/1,
   failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1, mc_test/1]).
 
+
+
+init_per_suite(_Config) ->
+  %% this might help, might not...
+  os:cmd(os:find_executable("epmd") ++ " -daemon"),
+  {ok, Hostname} = inet:gethostname(),
+  case net_kernel:start([list_to_atom("runner@" ++ Hostname), shortnames]) of
+    {ok, _} -> ok;
+    {error, {already_started, _}} -> ok
+  end,
+  _Config.
+
+end_per_suite(_Config) ->
+  _Config.
 
 all() ->
   BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test],
@@ -88,7 +102,7 @@ start_nodes() ->
     ]},
     {lager_common_test_backend, debug}
   ],
-  rpc:multicall(Nodes, code, set_path, [CodePath]),
+  rpc:multicall(Nodes, code, add_pathsa, [CodePath]),
   rpc:multicall(Nodes, application, set_env, [lager, handlers, Handlers, [{persistent, true}]]),
   rpc:multicall(Nodes, application, ensure_all_started, [lager]),
   {_, []} = rpc:multicall(Masters, application, set_env, [lashup, contact_nodes, Masters]),
@@ -144,9 +158,9 @@ wait_for_node_dead(Node, 0) ->
 wait_for_node_dead(Node, N) ->
   timer:sleep(1000),
   case lists:member(Node, nodes()) of
-    true->
-      wait_for_node_dead(Node, N-1);
-    false->
+    true ->
+      wait_for_node_dead(Node, N - 1);
+    false ->
       {ok, Node}
   end.
 
@@ -372,5 +386,5 @@ choose_nodes(Nodes, Count, Acc) ->
   Idx = random:uniform(length(Nodes)),
   Node = lists:nth(Idx, Nodes),
   Nodes1 = lists:delete(Node, Nodes),
-  choose_nodes(Nodes1, Count - 1, [Node|Acc]).
+  choose_nodes(Nodes1, Count - 1, [Node | Acc]).
 

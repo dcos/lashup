@@ -18,7 +18,6 @@ start_link() ->
   RetData = cowboy:start_http(?MODULE, AcceptorPool, [{port, 0}],
     [{env, [{dispatch, Dispatch}]}]
   ),
-  setup_reload(),
   maybe_log(),
   RetData.
 
@@ -39,17 +38,4 @@ routes2() ->
       {"/static/[...]", cowboy_static, {priv_dir, lashup, "static"}}
     ]}
   ].
-
-setup_reload() ->
-  sync:onsync(fun onsync/1).
-
-onsync(Modules) ->
-  case lists:member(?MODULE, Modules) of
-    true ->
-      lager:debug("Reloading routes"),
-      cowboy:set_env(?MODULE, dispatch, routes());
-    false ->
-      ok
-  end.
-
 

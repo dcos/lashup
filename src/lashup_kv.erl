@@ -502,6 +502,7 @@ sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   ok.
 
 
+%% TODO: Refactor
 %% @private Finds the missing keys from remote metadata snapshot
 -spec(missing_keys(LocalAAEData :: metadata_snapshot(), RemoteAAEData :: metadata_snapshot()) -> [key()]).
 missing_keys(LocalAAEData, RemoteAAEData) ->
