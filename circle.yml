@@ -17,8 +17,7 @@ dependencies:
 test:
   override:
     - ./rebar3 compile
-    - ./rebar3 ct -v:
-        timeout: 3600
+    - ./rebar3 ct --readable=false
     - ./rebar3 eunit
     - ./rebar3 xref
     - ./rebar3 dialyzer
