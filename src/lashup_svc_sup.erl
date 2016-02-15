@@ -33,6 +33,7 @@ start_link() ->
 init([]) ->
   {ok, {{one_for_one, 5, 10}, [
     ?CHILD(lashup_kv_sup, supervisor),
-    ?CHILD(lashup_nervecenter_sup, supervisor)
+    ?CHILD(lashup_nervecenter_sup, supervisor),
+    ?CHILD(lashup_metadata_sup, supervisor)
   ]}}.
 

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 12. Feb 2016 3:14 PM
 %%%-------------------------------------------------------------------
--module(lashup_metadata_publish).
+-module(lashup_metadata_index).
 -author("sdhillon").
 
 -behaviour(gen_server).
@@ -24,11 +24,18 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-include_lib("stdlib/include/ms_transform.hrl").
+
+-record(state, {
+  ref = erlang:error() :: reference()
+}).
 -type state() :: #state{}.
 
 -include("lashup_metadata.hrl").
--include_lib("kernel/include/inet.hrl").
+
+-record(node_ip, {ip, nodename, id}).
+-record(node_id, {nodename, id}).
+
 
 %%%===================================================================
 %%% API
@@ -64,8 +71,10 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  gen_server:cast(self(), check_metadata),
-  {ok, #state{}}.
+  node_ip = ets:new(node_ip, [bag, named_table, {keypos, #node_ip.ip}]),
+  node_id = ets:new(node_id, [set, named_table, {keypos, #node_ip.nodename}]),
+  {ok, Ref} = lashup_kv_events_helper:start_link(ets:fun2ms(fun({[node_metadata|_]}) -> true end)),
+  {ok, #state{ref = Ref}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -96,9 +105,6 @@ handle_call(_Request, _From, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
-handle_cast(check_metadata, State) ->
-  check_metadata(),
-  {noreply, State};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -116,6 +122,9 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_info({lashup_kv_events, Event = #{ref := Reference}}, State = #state{ref = Ref}) when Ref == Reference ->
+  handle_event(Event),
+  {noreply, State};
 handle_info(_Info, State) ->
   {noreply, State}.
 
@@ -154,70 +163,36 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 
-check_metadata() ->
-  NodeMetadata = lashup_kv:value([node_metadata, node()]),
-  NodeMetadataDict = orddict:from_list(NodeMetadata),
-  Ops = check_ip(NodeMetadataDict, []),
-  Ops1 = check_node_id(NodeMetadata, Ops),
-  lager:debug("Performing ops: ~p", [Ops]),
-  perform_ops(Ops1).
+%%#{key => Key, map => Map, vclock => VClock, value => Value, ref => Reference},
+handle_event(Event = #{type := ingest_update}) ->
+  handle_update(Event);
+handle_event(Event = #{type := ingest_new}) ->
+  handle_new(Event).
 
-perform_ops([]) ->
-  ok;
-perform_ops(Ops) ->
-  {ok, _} = lashup_kv:request_op([node_metadata, node()], {update, Ops}).
+handle_new(_Event = #{key := Key, value := Value}) ->
+  Value1 = orddict:from_list(Value),
+  [node_metadata, Nodename] = Key,
+  IP = orddict:fetch(?IP_FIELD, Value1),
+  ID = orddict:fetch(?ID_FIELD, Value1),
+  ets:insert(node_ip, #node_ip{ip = IP, id = ID, nodename = Nodename}),
+  ets:insert(node_id, #node_id{nodename = Nodename, id = ID}).
 
+%% TODO: Refactor
+handle_update(_Event = #{key := Key, value := Value, old_value := OldValue}) ->
+  Value1 = orddict:from_list(Value),
+  OldValue1 = orddict:from_list(OldValue),
+  [node_metadata, Nodename] = Key,
+  IP = orddict:fetch(?IP_FIELD, Value1),
+  ID = orddict:fetch(?ID_FIELD, Value1),
+  OldIP = orddict:fetch(?IP_FIELD, OldValue1),
+  OldID = orddict:fetch(?ID_FIELD, OldValue1),
+  if
+    OldIP == IP andalso OldID == ID ->
+      ok;
+    true ->
+      ets:delete_object(node_ip, #node_ip{ip = OldIP, id = OldID, nodename = Nodename})
+  end,
+  ets:insert(node_ip, #node_ip{ip = IP, id = ID, nodename = Nodename}),
+  ets:insert(node_id, #node_id{nodename = Nodename, id = ID}).
 
-check_node_id(NodeMetadata, Ops) ->
-  ID = lashup_gm:id(),
-  check_node_id(ID, NodeMetadata, Ops).
-
-check_node_id(ID, NodeMetadata, Ops) ->
-  case orddict:find(?ID_FIELD, NodeMetadata) of
-    {ok, ID} ->
-      Ops;
-    _ ->
-      [{update, ?ID_FIELD, {assign, ID, erlang:system_time(nano_seconds)}}|Ops]
-  end.
-
-check_ip(NodeMetadata, Ops) ->
-  IP = get_ip(),
-  check_ip(IP, NodeMetadata, Ops).
-
-check_ip(IP, NodeMetadata, Ops) ->
-  case orddict:find(?IP_FIELD, NodeMetadata) of
-    {ok, IP} ->
-      Ops;
-    _ ->
-      set_ip(IP, Ops)
-  end.
-
-set_ip(IP, Ops) ->
-  [{update, ?IP_FIELD, {assign, IP, erlang:system_time(nano_seconds)}}|Ops].
-
-
-get_ip() ->
-  case lashup_utils:get_dcos_ip() of
-    false ->
-      infer_ip();
-    IP ->
-      IP
-  end.
-
-infer_ip() ->
-  ForeignIP = get_foreign_ip(),
-  {ok, Socket} = gen_udp:open(0),
-  inet_udp:connect(Socket, ForeignIP, 4),
-  {ok, {Address, _LocalPort}} = inet:sockname(Socket),
-  gen_udp:close(Socket),
-  Address.
-
-get_foreign_ip() ->
-  case inet:gethostbyname("leader.mesos") of
-    {ok, Hostent} ->
-      [Addr | _] = Hostent#hostent.h_addr_list,
-      Addr;
-    _ ->
-      {192, 88, 99, 0}
-  end.
 

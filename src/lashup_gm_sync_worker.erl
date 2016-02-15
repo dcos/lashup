@@ -76,7 +76,7 @@ send_unchecked_nodes(NodesCheckedSet, State) ->
   unlink(State#state.fanout_pid).
 
 
-handle_node_clock(_NodeClock = #{node_clock := {Node, VClock}},
+handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteVector}},
     State = #state{nodes_checked = NodeChecked, fanout_pid = Pid}) ->
   Key = lashup_utils:nodekey(Node, State#state.seed),
   case ets:lookup(members, Key) of
@@ -84,19 +84,23 @@ handle_node_clock(_NodeClock = #{node_clock := {Node, VClock}},
     State;
   [Member] ->
     State1 = State#state{nodes_checked = [Node|NodeChecked]},
-    MemberVClock = dvvset:join(Member#member.dvvset),
-    lager:debug("Local, Remote: ~p, ~p", [MemberVClock, VClock]),
-    case {dvvset:less(VClock, MemberVClock), dvvset:less(MemberVClock, VClock)} of
-      {true, false} ->
-        lager:debug("Syncing: ~p", [Key]),
-        UpdatedNode = to_event(Member),
-        CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
-        erlang:send(Pid, {event, CompressedTerm}, [noconnect]),
-        State1;
+    LocalVector = dvvset:join(Member#member.dvvset),
+    case {dvvset:descends(RemoteVector, LocalVector), dvvset:descends(LocalVector, RemoteVector)} of
+      {false, true} ->
+        send_event(Pid, Member);
+      {false, false} ->
+        send_event(Pid, Member);
       _ ->
-        State
-    end
+        ok
+    end,
+    State1
   end.
+
+send_event(Pid, Member) ->
+  UpdatedNode = to_event(Member),
+  CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
+  erlang:send(Pid, {event, CompressedTerm}, [noconnect]).
+
 
 send_member(Node, State = #state{fanout_pid = Pid}) ->
   Key = lashup_utils:nodekey(Node, State#state.seed),

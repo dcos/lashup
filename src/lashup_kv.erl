@@ -33,6 +33,8 @@
   terminate/2,
   code_change/3]).
 
+-export_type([key/0]).
+
 -define(SERVER, ?MODULE).
 -define(MAX_AAE_REPLIES, 10).
 %% What's the maximum number of lubs to advertise
@@ -54,31 +56,27 @@
 
 -type metadata_snapshot() :: [{key(), vclock:vclock()}].
 
--record(kv, {
-  key = erlang:error() :: key(),
-  map = riak_dt_delta_map:new() :: riak_dt_delta_map:delta_map(),
-  vclock = vclock:fresh() :: vclock:vclock()
-}).
-
--type key() :: term().
+-include("lashup_kv.hrl").
 -type keys() :: [key()].
+
 -type kv() :: #kv{}.
 -type state() :: #state{}.
 -type aae_data() :: orddict:orddict(key(), vclock:vclock()).
+
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
--spec(request_op(Key :: key(), Op :: riak_dt_delta_map:map_op()) ->
-  {ok, riak_dt_delta_map:value()} | {error, Reason :: term()}).
+-spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
+  {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, Op) ->
   gen_server:call(?SERVER, {op, Key, Op}).
 
--spec(value(Key :: key()) -> riak_dt_delta_map:value()).
+-spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
-  KV = op_getkv(Key),
-  riak_dt_delta_map:value(KV#kv.map).
+  {_, KV} = op_getkv(Key),
+  riak_dt_map:value(KV#kv.map).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -111,7 +109,6 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   rand:seed(exs1024),
-
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
     lashup_timers:wait(60000,
@@ -150,7 +147,7 @@ init([]) ->
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
 handle_call({op, Key, Op}, _From, State) ->
-  {Reply, State1} = op(Key, Op, State),
+  {Reply, State1} = handle_op(Key, Op, State),
   {reply, Reply, State1};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -231,71 +228,84 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec op(Key :: term(), Op :: riak_dt_delta_map:map_op(), State :: state()) -> {Reply :: term(), State1 :: state()}.
-op(Key, Op, State) ->
-  KV = op_getkv(Key),
-  chk_op(op_perform(KV, Op, State), State).
-
-%% TODO: Add metrics
--spec(chk_op({ok, kv(), riak_dt_delta_map:delta_map()}, state()) ->
-  {{error, Reason :: term()} | {ok, riak_dt_delta_map:value()}, state()}).
-chk_op(OpStatus = {ok, NewKV = #kv{key = Key}, _Delta}, State) ->
-  case erlang:external_size(NewKV) of
-    Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
-      {{error, value_too_large}, State};
-    Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
-      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes (REJECTION IMMINENT)", [Key, Size]),
-      commit_op(OpStatus, State);
-    Size when Size > ?WARN_OBJECT_SIZE_KB * 10000 ->
-      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
-      commit_op(OpStatus, State);
-    _ ->
-      commit_op(OpStatus, State)
+-spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), State :: state()) -> {Reply :: term(), State1 :: state()}.
+handle_op(Key, Op, State) ->
+  {NewOrExisting, KV} = op_getkv(Key),
+  case modify_map(KV, Op, State) of
+    {ok, NewKV} ->
+      %% Do stuff
+      propagate(NewKV),
+      persist(NewOrExisting, KV, NewKV),
+      NewValue = riak_dt_map:value(NewKV#kv.map),
+      {{ok, NewValue}, State};
+    Error = {error, _Reason} ->
+      {Error, State}
+      %% Don't do stuff
   end.
 
--spec(commit_op({ok, kv(), riak_dt_delta_map:delta_map()}, state()) -> {{ok, riak_dt_delta_map:value()}, state()}).
-commit_op({ok, NewKV = #kv{map = Map}, Delta}, State) ->
-  ets:insert(?MODULE, NewKV),
-  propagate(NewKV, Delta),
-  NewValue = riak_dt_delta_map:value(Map),
-  {{ok, NewValue}, State}.
 
--spec (propagate(kv(), riak_dt_delta_map:delta_map()) -> ok).
-propagate(_KV = #kv{key = Key, vclock = VClock}, Delta) ->
-  Payload = #{type => delta_update, key => Key, vclock => VClock, delta => Delta},
-  lashup_gm_mc:multicast(?MODULE, Payload),
-  ok.
-
-% @private either gets the KV object for a given key, or returns an empty one
--spec(op_getkv(key()) -> kv()).
-op_getkv(Key) ->
-  case ets:lookup(?MODULE, Key) of
-    [] ->
-      #kv{key = Key};
-    [KV] ->
-      KV
-  end.
-
--spec(op_perform(KV :: kv(), Op :: riak_dt_delta_map:map_op(), State :: state()) ->
-    {ok, KV1 :: kv(), Delta :: riak_dt_delta_map:delta_map()}).
-op_perform(KV = #kv{vclock = VClock, map = Map}, Op, _State = #state{actor_id = ActorID}) ->
+-spec(modify_map(KV :: kv(), Op :: riak_dt_map:map_op(), State :: state()) ->
+{ok, KV1 :: kv(), Map :: riak_dt_map:dt_map()} | {error, Reason :: term()}).
+modify_map(KV = #kv{vclock = VClock, map = Map}, Op, _State = #state{actor_id = ActorID}) ->
   Now = erlang:system_time(nano_seconds),
   VClock1 = vclock:increment(ActorID, Now, VClock),
   {ok, ImpureDot} = vclock:get_dot(ActorID, VClock1),
   Dot = vclock:pure_dot(ImpureDot),
-  KV1 = KV#kv{vclock = VClock1},
-  op_perform(KV1, riak_dt_delta_map:delta_update(Op, Dot, Map)).
+  {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
+  KV1 = KV#kv{vclock = VClock1, map = Map1},
+  case check_map(KV1) of
+    ok ->
+      {ok, KV1};
+    Error = {error, _Reason} ->
+      Error
+  end.
 
-% @private Updates KV with the data from the delta (applies the delta to the KV object)
--spec(op_perform(kv(), {ok, Delta :: riak_dt_delta_map:delta_map()}) ->
-  {ok, kv(), Delta :: riak_dt_delta_map:delta_map()}).
-op_perform(KV = #kv{map = Map}, {ok, Delta}) ->
-  Map1 = riak_dt_delta_map:merge(Map, Delta),
-  {ok, KV#kv{map = Map1}, Delta}.
+
+
+%% TODO: Add metrics
+-spec(check_map(kv()) -> {error, Reason :: term()} | ok).
+check_map(NewKV = #kv{key = Key}) ->
+  case erlang:external_size(NewKV) of
+    Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
+      {error, value_too_large};
+    Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
+      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes (REJECTION IMMINENT)", [Key, Size]),
+      ok;
+    Size when Size > ?WARN_OBJECT_SIZE_KB * 10000 ->
+      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
+      ok;
+    _ ->
+      ok
+  end.
+
+-spec (propagate(kv()) -> ok).
+propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
+  Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
+  lashup_gm_mc:multicast(?MODULE, Payload),
+  ok.
+
+% @private either gets the KV object for a given key, or returns an empty one
+-spec(op_getkv(key()) -> {new, kv()} | {existing, kv()}).
+op_getkv(Key) ->
+  case ets:lookup(?MODULE, Key) of
+    [] ->
+      {new, #kv{key = Key}};
+    [KV] ->
+      {existing, KV}
+  end.
+
+-spec(persist(new | existing, kv(), kv()) -> ok).
+persist(new, _OldKV, KV = #kv{key = Key, vclock = VClock, map = Map}) ->
+  true = ets:insert(?MODULE, KV),
+  lashup_kv_events:ingest(Key, Map, VClock),
+  ok;
+persist(existing, OldKV, KV = #kv{key = Key, vclock = VClock, map = Map}) ->
+  true = ets:insert(?MODULE, KV),
+  lashup_kv_events:ingest(Key, OldKV#kv.map, Map, VClock),
+  ok.
+
 
 -spec(handle_lashup_gm_mc_event(map(), state()) -> state()).
-handle_lashup_gm_mc_event(#{payload := #{type := delta_update} = Payload}, State) ->
-  handle_delta_update(Payload, State);
 handle_lashup_gm_mc_event(Event = #{payload := #{type := lub_advertise}}, State) ->
   handle_lub_advertise(Event, State);
 handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State) ->
@@ -304,35 +314,36 @@ handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
 
--spec(handle_delta_update(map(), state()) -> state()).
-handle_delta_update(_Payload = #{key := Key, vclock := VClock, delta := Delta}, State) ->
-  KV = op_getkv(Key),
-  %% Does my local vclock descends from the remote one
-  %% If so ignore it
-  case vclock:descends(KV#kv.vclock, VClock) of
-    true ->
-      State;
-    false ->
-      handle_delta_update_write(KV, VClock, Delta),
-      State
-  end.
-
--spec(handle_delta_update_write(kv(), vclock:vclock(), riak_dt_delta_map:delta_map()) -> ok).
-handle_delta_update_write(KV = #kv{map = Map, vclock = LocalVClock}, RemoteVClock, Delta) ->
-  Map1 = riak_dt_delta_map:merge(Map, Delta),
-  VClock1 = vclock:merge([LocalVClock, RemoteVClock]),
-  KV1 = KV#kv{map = Map1, vclock = VClock1},
-  true = ets:insert(?MODULE, KV1),
-  ok.
-
 -spec(handle_full_update(map(), state()) -> state()).
 handle_full_update(_Payload = #{key := Key, vclock := VClock, map := Map}, State) ->
-  KV = op_getkv(Key),
-  Map1 = riak_dt_delta_map:merge(Map, KV#kv.map),
-  VClock1 =  vclock:merge([VClock, KV#kv.vclock]),
-  KV1 = KV#kv{map = Map1, vclock = VClock1},
-  true = ets:insert(?MODULE, KV1),
+  {NewOrExisting, KV} = op_getkv(Key),
+  case get_maybe_write(KV, Map, VClock) of
+    {ok, NewKV} ->
+      persist(NewOrExisting, KV, NewKV);
+    false ->
+      ok
+  end,
   State.
+
+-spec(get_maybe_write(kv(), riak_dt_map:dt_map(), vclock:vclock()) -> false | {ok, kv()}).
+get_maybe_write(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+  case {vclock:descends(RemoteVClock, LocalVClock), vclock:descends(LocalVClock, RemoteVClock)} of
+    {true, false} ->
+      get_write(KV, RemoteMap, RemoteVClock);
+    {false, false} ->
+      get_write(KV, RemoteMap, RemoteVClock);
+    %% Either they are equal, or the local one is newer - perhaps trigger AAE?
+    _ ->
+      false
+  end.
+
+-spec(get_write(kv(), riak_dt_map:dt_map(), vclock:vclock()) -> {ok, kv()}).
+get_write(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+  Map1 = riak_dt_map:merge(RemoteMap, KV#kv.map),
+  VClock1 = vclock:merge([LocalVClock, RemoteVClock]),
+  KV1 = KV#kv{map = Map1, vclock = VClock1},
+  {ok, KV1}.
+
 
 -spec(aae_snapshot() -> aae_data()).
 aae_snapshot() ->
@@ -349,6 +360,7 @@ handle_aae_wakeup(State) ->
   aae_controlled_snapshot([State#state.last_selected_key], State).
 
 %% We have more than ?AAE_LUB_LIMIT keys
+-spec(aae_controlled_snapshot([key() | '$end_of_table'], state()) -> state()).
 aae_controlled_snapshot(Acc, State) when length(Acc) >= ?AAE_LUB_LIMIT  ->
   aae_begin_end(Acc, State);
 %% The table is empty
@@ -367,7 +379,7 @@ aae_controlled_snapshot(Acc = [PreviousKey|_], State) ->
   aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key}).
 
 %% Empty table
-
+-spec(aae_begin_end(keys(), state()) -> state()).
 aae_begin_end([], State) ->
   aae_advertise_data(#{aae_data => []}, State);
 aae_begin_end(['$end_of_table'], State) ->
@@ -378,6 +390,7 @@ aae_begin_end(Keys = [LastKey|_RestKeys], State) ->
   aae_begin_end(FirstKey, LastKey, Records, State).
 
 %% We iterated through the entire table
+-spec(aae_begin_end(key(), key(), [{key(), kv()}], state()) -> state()).
 aae_begin_end('$end_of_table', '$end_of_table', Records, State = #state{last_selected_key = '$end_of_table'}) ->
   aae_advertise_data(#{aae_data => Records}, State);
 
@@ -393,9 +406,9 @@ aae_begin_end(FirstKey, '$end_of_table', Records, State) ->
 aae_begin_end(FirstKey, LastKey, Records, State) ->
   aae_advertise_data(#{aae_data => Records, start_key => FirstKey, end_key => LastKey}, State).
 
+-spec(aae_advertise_data(map(), state()) -> state()).
 aae_advertise_data(Payload, State) ->
   Payload1 = Payload#{type => lub_advertise},
-  lager:debug("Multicasting: ~p", [Payload1]),
   lashup_gm_mc:multicast(?MODULE, Payload1, [{ttl, 1}, {fanout, 1}]),
   State.
 
@@ -403,7 +416,7 @@ aae_advertise_data(Payload, State) ->
 -spec(handle_lub_advertise(map(), state()) -> state()).
 handle_lub_advertise(_Event, State = #state{metadata_snapshot_current = []}) ->
   State;
-handle_lub_advertise(_Event = #{origin := Origin, payload := #{aae_data := RemoteAAEData} = Payload},
+handle_lub_advertise(#{origin := Origin, payload := #{aae_data := RemoteAAEData} = Payload},
     State = #state{metadata_snapshot_current = LocalAAEData}) ->
   LocalAAEData1 = trim_local_aae_data(LocalAAEData, Payload),
   sync(Origin, LocalAAEData1, RemoteAAEData),
@@ -428,13 +441,13 @@ trim_local_aae_data(LocalAAEData, _) ->
 sync(Origin, LocalAAEData, RemoteAAEData) ->
   %% Prioritize merging MissingKeys over Divergent Keys.
   Keys = keys_to_sync(LocalAAEData, RemoteAAEData),
-  lager:debug("Syncing keys: ~p", [Keys]),
   sync_keys(Origin, Keys).
 
 -spec(sync_keys(Origin :: node(), keys()) -> ok).
 sync_keys(Origin, KeyList) ->
   KVs = [op_getkv(Key) || Key <- KeyList],
-  [sync_key(Origin, KV) || KV <- KVs],
+  KVs1 = [KV || {_, KV} <- KVs],
+  [sync_key(Origin, KV) || KV <- KVs1],
   ok.
 
 -spec(keys_to_sync(aae_data(), aae_data()) -> keys()).
@@ -458,7 +471,6 @@ keys_to_sync(Keys) ->
 
 
 %% TODO: Add backpressure
-%% TODO: Add jitter to avoid overwhelming the node we're
 -spec(sync_key(Origin :: node(), KV :: kv()) -> ok).
 sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
@@ -490,8 +502,8 @@ sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   ok.
 
 
-%% This finds the missing keys from the remote data
--spec(missing_keys(metadata_snapshot(), metadata_snapshot()) -> [key()]).
+%% @private Finds the missing keys from remote metadata snapshot
+-spec(missing_keys(LocalAAEData :: metadata_snapshot(), RemoteAAEData :: metadata_snapshot()) -> [key()]).
 missing_keys(LocalAAEData, RemoteAAEData) ->
   RemoteAAEDataDict = orddict:from_list(RemoteAAEData),
   LocalAAEDataDict = orddict:from_list(LocalAAEData),
@@ -507,8 +519,8 @@ missing_keys(LocalAAEData, RemoteAAEData) ->
 %% 3b. If the remote vector clock does not descend from me, I win (concurrency)
 
 
-%% descends(A, B) andalso not descends(B, A).
--spec(divergent_keys(metadata_snapshot(), metadata_snapshot()) -> [key()]).
+%% @private Given two metadata snapshots, it returns which keys diverge (have concurrent changes)
+-spec(divergent_keys(LocalAAEData :: metadata_snapshot(), RemoteAAEData :: metadata_snapshot()) -> [key()]).
 divergent_keys(LocalAAEData, RemoteAAEData) ->
   [ LocalKey ||
     {LocalKey, LocalClock} <- LocalAAEData,
@@ -522,8 +534,8 @@ divergent_keys(LocalAAEData, RemoteAAEData) ->
       )
     ].
 
-% @private promotes the next snapshot, to th current metadata snapshot, and takes the next snapshot
-% May make sense to build the snapshot asynchronously
+%% @private promotes the next snapshot, to th current metadata snapshot, and takes the next snapshot
+%% May make sense to build the snapshot asynchronously
 -spec(handle_metadata_snapshot(state()) -> state()).
 handle_metadata_snapshot(State = #state{metadata_snapshot_next = MSN}) ->
   State#state{metadata_snapshot_current = MSN, metadata_snapshot_next = aae_snapshot()}.

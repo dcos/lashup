@@ -7,7 +7,7 @@
 %%% Created : 15. Jan 2016 2:56 AM
 %%%-------------------------------------------------------------------
 
-%% TODO: Move to use dvvset rather than our own vclock madness
+%% TODO: Get rid of DVVSet, and move to a pruneable datastructure
 
 
 -module(lashup_gm).
@@ -20,10 +20,10 @@
 -export([start_link/0,
   get_subscriptions/0,
   gm/0,
-  path_to/1,
   get_neighbor_recommendations/1,
   seed/0,
-  lookup_node/2
+  lookup_node/2,
+  id/0
 ]).
 
 %% gen_server callbacks
@@ -56,8 +56,6 @@
 %%% API
 %%%===================================================================
 
-path_to(Node) ->
-  gen_server:call(?SERVER, {path_to, Node}).
 
 %% @doc
 %% Timeout here is limited to 500 ms, and not less
@@ -86,7 +84,8 @@ get_subscriptions() ->
 seed() ->
   gen_server:call(?SERVER, seed).
 
-
+id() ->
+  gen_server:call(?SERVER, id).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -122,7 +121,6 @@ init([]) ->
   %% TODO: Add jitter
   MyPid = self(),
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
-  ets:new(node_ips, [bag, named_table]),
   ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}, compressed]),
   lashup_hyparview_events:subscribe(
     fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
@@ -151,6 +149,8 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_call(id, _From, State = #state{vclock_id = VClockID}) ->
+  {reply, VClockID, State};
 handle_call(gm, _From, State) ->
   {reply, get_membership(), State};
 handle_call({subscribe, Pid}, _From, State) ->
@@ -407,17 +407,18 @@ store_and_forward_new_updated_node(From,
 
 maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{dvvset := DVVSet}, State) ->
   %% Should be true, if the remote one is newer
-
-  case {dvvset:less(DVVSet, Member#member.dvvset),
-    dvvset:less(Member#member.dvvset, DVVSet)}  of
+  RemoteVector = dvvset:join(DVVSet),
+  LocalVector = dvvset:join(Member#member.dvvset),
+  case {dvvset:descends(RemoteVector, LocalVector), dvvset:descends(LocalVector, RemoteVector)} of
+    %% The two are equal
     {true, true} ->
       ok;
-    %% Our local DVVSet is older
+    %% Our local vector is newer
     {false, true} ->
-      store_and_forward_updated_node(Member, From, UpdatedNode, State);
-    {true, false} ->
       ok;
-    %% Either our local clock is newer, or we've experienced a concurrency event
+    {true, false} ->
+      store_and_forward_updated_node(Member, From, UpdatedNode, State);
+    %% We've experienced a concurrency event
     {false, false} ->
       merge_and_forward_updated_node(Member, From, UpdatedNode, State)
   end,

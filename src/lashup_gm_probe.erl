@@ -67,7 +67,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  random:seed(lashup_utils:seed()),
+  rand:seed(exs1024),
   State = #state{},
   schedule_next_probe(),
   {ok, State}.
@@ -217,7 +217,7 @@ do_probe(Tree) ->
 
 -spec(probe_oneof(UnreachableNodes :: [node()]) -> ok).
 probe_oneof(UnreachableNodes) ->
-  Idx = random:uniform(length(UnreachableNodes)),
+  Idx = rand:uniform(length(UnreachableNodes)),
   OtherNode = lists:nth(Idx, UnreachableNodes),
   lashup_hyparview_membership:recommend_neighbor(OtherNode),
   ok.
