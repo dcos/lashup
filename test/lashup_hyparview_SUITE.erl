@@ -421,14 +421,14 @@ wait_for_consistency(_TotalTime, _Interval, _Nodes) ->
 
 check_nodes_for_consistency([], _AllNodes) ->
   true;
-check_nodes_for_consistency([Node|Rest], AllNodes) ->
+check_nodes_for_consistency([Node | Rest], AllNodes) ->
   Result =
-  lists:takewhile(
-    fun(OtherNode) ->
-      rpc:call(Node, lashup_kv, value, [OtherNode]) == [{{test_counter,riak_dt_pncounter},5}]
-    end,
-    AllNodes
-  ),
+    lists:takewhile(
+      fun(OtherNode) ->
+        rpc:call(Node, lashup_kv, value, [OtherNode]) == [{{test_counter, riak_dt_pncounter}, 5}]
+      end,
+      AllNodes
+    ),
   case Result of
     AllNodes ->
       check_nodes_for_consistency(Rest, AllNodes);

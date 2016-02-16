@@ -21,8 +21,7 @@
   get_subscriptions/0,
   gm/0,
   get_neighbor_recommendations/1,
-  seed/0,
-  lookup_node/2,
+  lookup_node/1,
   id/0
 ]).
 
@@ -67,10 +66,9 @@
 get_neighbor_recommendations(ActiveViewSize) ->
   gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
-%% @doc Looks up a node in one ets lookup if you know the seed, rather unsafe
-%% because you don't know if lashup_gm has crashed
-lookup_node(Node, Seed) ->
-  case ets:lookup(members, nodekey(Node, Seed)) of
+%% @doc Looks up a node in ets
+lookup_node(Node) ->
+  case ets:lookup(members, Node) of
     [] ->
       error;
     [Member] ->
@@ -82,9 +80,6 @@ gm() ->
 
 get_subscriptions() ->
   gen_server:call(?SERVER, get_subscriptions).
-
-seed() ->
-  gen_server:call(?SERVER, seed).
 
 id() ->
   gen_server:call(?SERVER, id).
@@ -119,11 +114,12 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  rand:seed(exs1024),
   random:seed(lashup_utils:seed()),
   %% TODO: Add jitter
   MyPid = self(),
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
-  ets:new(members, [ordered_set, named_table, {keypos, #member.nodekey}, compressed]),
+  ets:new(members, [ordered_set, named_table, {keypos, #member.node}, compressed]),
   lashup_hyparview_events:subscribe(
     fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
   VClockID = {node(), erlang:phash2(random:uniform())},
@@ -335,7 +331,6 @@ init_dvvset(State = #state{vclock_id = VClockID}) ->
   DVVSetValue = lww(DVVSet),
   Member = #member{
     node = node(),
-    nodekey = nodekey(node(), State),
     dvvset = DVVSet,
     locally_updated_at = [LocalUpdate],
     clock_deltas = [ClockDelta],
@@ -344,14 +339,10 @@ init_dvvset(State = #state{vclock_id = VClockID}) ->
   },
   persist(Member, State).
 
-nodekey(Node, _State = #state{seed = Seed}) ->
-  lashup_utils:nodekey(Node, Seed);
-nodekey(Node, Seed) ->
-  lashup_utils:nodekey(Node, Seed).
 
 %% @private Update the local node's DVVSet
 update_node(State) ->
-  [Member] = ets:lookup(members, nodekey(node(), State)),
+  [Member] = ets:lookup(members, node()),
   NodeClock = erlang:system_time(nano_seconds),
   MergedDVVSet = update_dvvset(NodeClock, Member#member.dvvset, State),
   update_node(MergedDVVSet, State).
@@ -373,7 +364,7 @@ handle_updated_node(_From, UpdatedNode = #{ttl := TTL}, State) when TTL < 0 ->
   State;
 
 handle_updated_node(From, UpdatedNode = #{node := Node}, State) ->
-  case ets:lookup(members, nodekey(Node, State)) of
+  case ets:lookup(members, Node) of
     [] ->
       %% Brand new, store it
       store_and_forward_new_updated_node(From, UpdatedNode, State);
@@ -394,7 +385,6 @@ store_and_forward_new_updated_node(From,
   ClockDelta = abs(NodeClock - LocalUpdate),
   Member = #member{
     node = Node,
-    nodekey = nodekey(Node, State),
     locally_updated_at = [LocalUpdate],
     clock_deltas = [ClockDelta],
     dvvset = DVVSet,
@@ -560,19 +550,15 @@ process_new_member(Member, NewMember, _State = #state{active_view = HyparViewAct
   ok.
 
 handle_get_neighbor_recommendations(ActiveViewSize) ->
-  %% We don't have to do any randomization on the table to avoid colliding joins
-  %% the reason for this is that every row is prefixed with the nodekey
-  %% and the nodekey is generated based on a hash of the node
-  %% and a locally generated nonce
-  %% So, everyone will have a slightly different sort order
   MatchSpec = ets:fun2ms(
     fun(Member = #member{active_view = ActiveView})
       when length(ActiveView) < ActiveViewSize andalso Member#member.node =/= node()
       -> Member
     end
   ),
-  case ets:select(members, MatchSpec, 1) of
-    {[Member], _Continuation} ->
+  case ets:select(members, MatchSpec, 100) of
+    {[Members], _Continuation} ->
+      [Member|_] = lashup_utils:shuffle_list(Members),
       {ok, Member#member.node};
     '$end_of_table' ->
       false
@@ -581,13 +567,7 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
 %% ETS write functions
 delete(Member = #member{}, _State) ->
   lashup_gm_route:delete_node(Member#member.node),
-  case ets:lookup(members, Member#member.nodekey) of
-    [Member] ->
-      ets:delete(members, Member#member.nodekey),
-      ok;
-    [] ->
-      ok
-  end.
+  ets:delete(members, Member#member.node).
 
 
 %% TODO:
@@ -595,7 +575,7 @@ delete(Member = #member{}, _State) ->
 -spec(persist(Member :: member(), State :: state()) -> ok).
 persist(Member, _State) ->
   lashup_gm_route:update_node(Member#member.node, Member#member.active_view),
-  case ets:lookup(members, Member#member.nodekey) of
+  case ets:lookup(members, Member#member.node) of
     [OldMember] ->
       ets:insert(members, Member),
       lashup_gm_events:ingest(OldMember, Member);

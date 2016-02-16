@@ -1,6 +1,4 @@
-%-record(lashup_join_message, {type, payload}).
 -record(member, {
-  nodekey :: {Key :: integer(), Node :: node()},
   node :: Node :: node(),
   locally_updated_at = [] :: [integer()],
   clock_deltas = [] :: [integer()],

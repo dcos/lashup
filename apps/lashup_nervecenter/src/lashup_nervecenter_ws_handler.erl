@@ -20,8 +20,7 @@
 -include_lib("lashup/include/lashup.hrl").
 -record(state, {
   lashup_gm_events_ref = undefined,
-  nervecenter_ref = undefined,
-  gm_seed = undefined
+  nervecenter_ref = undefined
 }).
 
 init(_, _Req, _Opts) ->
@@ -87,8 +86,8 @@ build_update_message(Member = #member{active_view = ActiveView}, State) ->
 
 build_update_message([], Messages, _State) ->
   Messages;
-build_update_message([ActiveViewMember|ActiveView], Messages, State = #state{gm_seed = Seed}) ->
-  case lashup_gm:lookup_node(ActiveViewMember, Seed) of
+build_update_message([ActiveViewMember|ActiveView], Messages, State) ->
+  case lashup_gm:lookup_node(ActiveViewMember) of
     error ->
       build_update_message(ActiveView, Messages, State);
     {ok, Member} ->
@@ -112,8 +111,7 @@ handle_subscribe(_Request, State) ->
   {ok, NervecenterRef} = lashup_gm_mc_events:subscribe([nervecenter]),
   {ok, GMEventsRef} = lashup_gm_events:subscribe(),
   GlobalMembership = lashup_gm:gm(),
-  GMSeed = lashup_gm:seed(),
-  State1 = State#state{lashup_gm_events_ref = GMEventsRef, nervecenter_ref = NervecenterRef, gm_seed = GMSeed},
+  State1 = State#state{lashup_gm_events_ref = GMEventsRef, nervecenter_ref = NervecenterRef},
   Nodes = to_nodes(GlobalMembership),
   Reply = #{message_type => initial_state, nodes => Nodes},
   {Reply, State1}.
