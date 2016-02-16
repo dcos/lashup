@@ -4,8 +4,9 @@
     {vsn, "1"},
     {registered, []},
     {applications, [
-      lashup
+      lashup,
+      lashup_kv
     ]},
-    {mod, { lashup_app, []}},
+    {mod, { lashup_nervecenter_app, []}},
     {env, []}
   ]}.

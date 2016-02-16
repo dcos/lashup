@@ -32,7 +32,6 @@ start_link() ->
 
 init([]) ->
   {ok, {{one_for_one, 5, 10}, [
-    ?CHILD(lashup_nervecenter_collector, worker),
-    ?CHILD(lashup_nerve_center, supervisor)
+    ?CHILD(lashup_nervecenter_collector, worker)
   ]}}.
 

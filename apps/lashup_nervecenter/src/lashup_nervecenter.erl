@@ -10,7 +10,7 @@
 -author("sdhillon").
 
 %% API
--export([start_link/0]).
+-export([start_link/0, stop/0]).
 
 start_link() ->
   AcceptorPool = 10,
@@ -20,6 +20,9 @@ start_link() ->
   ),
   maybe_log(),
   RetData.
+
+stop() ->
+  cowboy:stop_listener(?MODULE).
 
 maybe_log() ->
   case catch ranch:get_port(?MODULE) of
@@ -31,11 +34,12 @@ maybe_log() ->
 routes() ->
   cowboy_router:compile(routes2()).
 routes2() ->
+  {ok, Application} = application:get_application(),
   [
     {'_', [
-      {"/", cowboy_static, {priv_file, lashup, "static/index.html"}},
-      {"/websocket", lashup_nerve_center_ws_handler, []},
-      {"/static/[...]", cowboy_static, {priv_dir, lashup, "static"}}
+      {"/", cowboy_static, {priv_file, Application, "static/index.html"}},
+      {"/websocket", lashup_nervecenter_ws_handler, []},
+      {"/static/[...]", cowboy_static, {priv_dir, Application, "static"}}
     ]}
   ].
 
