@@ -17,7 +17,7 @@
   websocket_terminate/3
 ]).
 
--include_lib("lashup/include/lashup.hrl").
+-include("lashup.hrl").
 -record(state, {
   lashup_gm_events_ref = undefined,
   nervecenter_ref = undefined

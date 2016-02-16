@@ -38,7 +38,7 @@
 
 -include_lib("kernel/include/inet.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
--include_lib("lashup.hrl").
+-include("lashup.hrl").
 
 -record(subscriber, {monitor_ref, node, pid}).
 -record(subscription, {node, pid, monitor_ref}).

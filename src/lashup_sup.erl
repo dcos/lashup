@@ -4,9 +4,10 @@
 %%% @doc
 %%%
 %%% @end
-%%% Created : 08. Feb 2016 7:55 AM
+%%% Created : 06. Jan 2016 3:37 PM
 %%%-------------------------------------------------------------------
--module(lashup_metadata_sup).
+-module(lashup_sup).
+-author("sdhillon").
 
 -behaviour(supervisor).
 
@@ -31,8 +32,8 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, {{one_for_one, 5, 10}, [
-    ?CHILD(lashup_metadata_publish, worker),
-    ?CHILD(lashup_metadata_index, worker)
-  ]}}.
+  {ok, { {rest_for_one, 5, 10}, [
+    ?CHILD(lashup_core_sup, supervisor),
+    ?CHILD(lashup_platform_sup, supervisor)
+  ]} }.
 

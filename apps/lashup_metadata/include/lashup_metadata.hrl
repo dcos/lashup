@@ -1,2 +1,0 @@
--define(IP_FIELD, {ip, riak_dt_lwwreg}).
--define(ID_FIELD, {id, riak_dt_lwwreg}).

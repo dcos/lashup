@@ -1,4 +1,4 @@
--module(lashup_metadata_app).
+-module(lashup_app).
 
 -behaviour(application).
 
@@ -10,8 +10,8 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-  lashup_metadata_sup:start_link().
+  lashup_nervecenter:start_link(),
+  lashup_sup:start_link().
 
 stop(_State) ->
-  ok.
-
+  lashup_nervecenter:stop().

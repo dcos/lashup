@@ -395,8 +395,8 @@ choose_nodes(Nodes, Count, Acc) ->
 kv_test(Config) ->
   AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
   application:ensure_all_started(lager),
-  _Status = rpc:multicall(?config(masters, Config), application, ensure_all_started, [lashup_kv]),
-  rpc:multicall(?config(slaves, Config), application, ensure_all_started, [lashup_kv]),
+  _Status = rpc:multicall(?config(masters, Config), application, ensure_all_started, [lashup]),
+  rpc:multicall(?config(slaves, Config), application, ensure_all_started, [lashup]),
   %% Normal value is 5 minutes, let's not wait that long
   {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, aae_interval, 30000]),
   Update1 = {update, [{update, {test_counter, riak_dt_pncounter}, {increment, 5}}]},
