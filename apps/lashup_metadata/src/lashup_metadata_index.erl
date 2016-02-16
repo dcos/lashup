@@ -14,7 +14,8 @@
 -dialyzer(no_improper_lists).
 
 %% API
--export([start_link/0]).
+-export([start_link/0,
+  nodenames/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -42,6 +43,25 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+
+nodenames(IP = {_A, _B, _C, _D}) ->
+  case ets:lookup(node_ip, IP) of
+    [] ->
+      error;
+    Nodes ->
+      Nodes2 = lists:filter(fun matches_id/1, Nodes),
+      [Nodename || #node_ip{nodename = Nodename} <- Nodes2]
+  end.
+
+matches_id(#node_ip{id = Id, nodename = NodeName}) ->
+
+  case lashup_gm:id(NodeName) of
+    Id ->
+      true;
+    _ ->
+      false
+  end.
 
 %%--------------------------------------------------------------------
 %% @doc

@@ -24,7 +24,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+-record(state, {lashup_gm_monitor = erlang:error() :: reference()}).
 -type state() :: #state{}.
 
 -include("lashup_metadata.hrl").
@@ -64,8 +64,10 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  Ref = monitor(process, lashup_gm),
+  State = #state{lashup_gm_monitor = Ref},
   gen_server:cast(self(), check_metadata),
-  {ok, #state{}}.
+  {ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -116,6 +118,8 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_info({'DOWN', MonitorRef, _Type, _Object, _Info}, State) when MonitorRef == State#state.lashup_gm_monitor ->
+  {stop, lashup_gm_failure, State};
 handle_info(_Info, State) ->
   {noreply, State}.
 

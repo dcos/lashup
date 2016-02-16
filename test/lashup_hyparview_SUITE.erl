@@ -29,8 +29,8 @@ init_per_suite(Config) ->
   end,
   Config.
 
-end_per_suite(_Config) ->
-  _Config.
+end_per_suite(Config) ->
+  Config.
 
 all() ->
   BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test, kv_test],
