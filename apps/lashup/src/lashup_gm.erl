@@ -67,6 +67,8 @@
 get_neighbor_recommendations(ActiveViewSize) ->
   gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
+%% @doc Looks up a node in one ets lookup if you know the seed, rather unsafe
+%% because you don't know if lashup_gm has crashed
 lookup_node(Node, Seed) ->
   case ets:lookup(members, nodekey(Node, Seed)) of
     [] ->

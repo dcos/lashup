@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 07. Feb 2016 10:45 PM
 %%%-------------------------------------------------------------------
--module(lashup_nerve_center_ws_handler).
+-module(lashup_nervecenter_ws_handler).
 -author("sdhillon").
 
 -export([
@@ -17,7 +17,7 @@
   websocket_terminate/3
 ]).
 
--include("lashup.hrl").
+-include_lib("lashup/include/lashup.hrl").
 -record(state, {
   lashup_gm_events_ref = undefined,
   nervecenter_ref = undefined,

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 07. Feb 2016 10:20 PM
 %%%-------------------------------------------------------------------
--module(lashup_nerve_center_handler).
+-module(lashup_nervecenter_handler).
 -author("sdhillon").
 
 

@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 06. Jan 2016 3:37 PM
 %%%-------------------------------------------------------------------
--module(lashup_hyparview_sup).
+-module(lashup_sup).
 -author("sdhillon").
 
 -behaviour(supervisor).

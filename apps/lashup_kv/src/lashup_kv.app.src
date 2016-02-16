@@ -1,0 +1,11 @@
+{application, lashup_kv,
+  [
+    {description, ""},
+    {vsn, "1"},
+    {registered, []},
+    {applications, [
+      lashup
+    ]},
+    {mod, { lashup_kv_app, []}},
+    {env, []}
+  ]}.

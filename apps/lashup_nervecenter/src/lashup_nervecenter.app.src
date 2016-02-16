@@ -1,0 +1,11 @@
+{application, lashup_nervecenter,
+  [
+    {description, ""},
+    {vsn, "1"},
+    {registered, []},
+    {applications, [
+      lashup
+    ]},
+    {mod, { lashup_app, []}},
+    {env, []}
+  ]}.

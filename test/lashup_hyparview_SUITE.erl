@@ -14,7 +14,8 @@
 -include_lib("common_test/include/ct.hrl").
 -export([all/0, init_per_testcase/2, end_per_testcase/2, init_per_suite/1, end_per_suite/1]).
 -export([hyparview_test/1, failure_test0/1, failure_test60/1,
-  failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1, mc_test/1]).
+  failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1, mc_test/1,
+  kv_test/1]).
 
 
 
@@ -32,7 +33,7 @@ end_per_suite(_Config) ->
   _Config.
 
 all() ->
-  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test],
+  BaseTests = [hyparview_test, hyparview_random_kill_test, ping_test, mc_test, kv_test],
   case ci() of
     true ->
       BaseTests ++ [failure_test300];
@@ -387,4 +388,51 @@ choose_nodes(Nodes, Count, Acc) ->
   Node = lists:nth(Idx, Nodes),
   Nodes1 = lists:delete(Node, Nodes),
   choose_nodes(Nodes1, Count - 1, [Node | Acc]).
+
+%% TODO:
+%% -Add Kill
+%% -Add concurrency
+kv_test(Config) ->
+  AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
+  application:ensure_all_started(lager),
+  _Status = rpc:multicall(?config(masters, Config), application, ensure_all_started, [lashup_kv]),
+  rpc:multicall(?config(slaves, Config), application, ensure_all_started, [lashup_kv]),
+  %% Normal value is 5 minutes, let's not wait that long
+  {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, aae_interval, 30000]),
+  Update1 = {update, [{update, {test_counter, riak_dt_pncounter}, {increment, 5}}]},
+  [rpc:call(Node, lashup_kv, request_op, [Node, Update1]) || Node <- AllNodes],
+  LeftOverTime = wait_for_consistency(600000, 5000, AllNodes),
+  ct:pal("Consistency acheived  in ~p milliseconds", [600000 - LeftOverTime]),
+  ok.
+
+
+wait_for_consistency(TotalTime, Interval, Nodes) when TotalTime > 0 ->
+  timer:sleep(Interval),
+  case check_nodes_for_consistency(Nodes, Nodes) of
+    true ->
+      TotalTime;
+    false ->
+      ct:pal("Inconsistent at: ~p remaining~n", [TotalTime]),
+      wait_for_consistency(TotalTime - Interval, Interval, Nodes)
+  end;
+wait_for_consistency(_TotalTime, _Interval, _Nodes) ->
+  ct:fail(never_consistent).
+
+
+check_nodes_for_consistency([], _AllNodes) ->
+  true;
+check_nodes_for_consistency([Node|Rest], AllNodes) ->
+  Result =
+  lists:takewhile(
+    fun(OtherNode) ->
+      rpc:call(Node, lashup_kv, value, [OtherNode]) == [{{test_counter,riak_dt_pncounter},5}]
+    end,
+    AllNodes
+  ),
+  case Result of
+    AllNodes ->
+      check_nodes_for_consistency(Rest, AllNodes);
+    _ ->
+      false
+  end.
 
