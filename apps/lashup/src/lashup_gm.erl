@@ -22,7 +22,8 @@
   gm/0,
   get_neighbor_recommendations/1,
   lookup_node/1,
-  id/0
+  id/0,
+  id/1
 ]).
 
 %% gen_server callbacks
@@ -82,7 +83,16 @@ get_subscriptions() ->
   gen_server:call(?SERVER, get_subscriptions).
 
 id() ->
-  gen_server:call(?SERVER, id).
+  id(node()).
+
+id(Node) ->
+  case lookup_node(Node) of
+    error ->
+      error;
+    {ok, Member} ->
+      maps:get(server_id, Member#member.dvvset_value)
+  end.
+
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -147,8 +157,6 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
-handle_call(id, _From, State = #state{vclock_id = VClockID}) ->
-  {reply, VClockID, State};
 handle_call(gm, _From, State) ->
   {reply, get_membership(), State};
 handle_call({subscribe, Pid}, _From, State) ->
@@ -553,13 +561,13 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
   MatchSpec = ets:fun2ms(
     fun(Member = #member{active_view = ActiveView})
       when length(ActiveView) < ActiveViewSize andalso Member#member.node =/= node()
-      -> Member
+      -> Member#member.node
     end
   ),
   case ets:select(members, MatchSpec, 100) of
-    {[Members], _Continuation} ->
+    {Members, _Continuation} ->
       [Member|_] = lashup_utils:shuffle_list(Members),
-      {ok, Member#member.node};
+      {ok, Member};
     '$end_of_table' ->
       false
   end.

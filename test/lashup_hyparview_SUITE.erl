@@ -401,8 +401,10 @@ kv_test(Config) ->
   {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, aae_interval, 30000]),
   Update1 = {update, [{update, {test_counter, riak_dt_pncounter}, {increment, 5}}]},
   [rpc:call(Node, lashup_kv, request_op, [Node, Update1]) || Node <- AllNodes],
-  LeftOverTime = wait_for_consistency(600000, 5000, AllNodes),
-  ct:pal("Consistency acheived  in ~p milliseconds", [600000 - LeftOverTime]),
+  LeftOverTime1 = wait_for_convergence(600000, 5000, AllNodes),
+  ct:pal("Converged in ~p milliseconds", [600000 - LeftOverTime1]),
+  LeftOverTime2 = wait_for_consistency(600000, 5000, AllNodes),
+  ct:pal("Consistency acheived  in ~p milliseconds", [600000 - LeftOverTime2]),
   ok.
 
 

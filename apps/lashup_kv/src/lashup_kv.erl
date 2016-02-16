@@ -447,6 +447,7 @@ sync(Origin, LocalAAEData, RemoteAAEData) ->
 sync_keys(Origin, KeyList) ->
   KVs = [op_getkv(Key) || Key <- KeyList],
   KVs1 = [KV || {_, KV} <- KVs],
+  lager:info("Syncing ~B keys to node: ~p", [length(KeyList), Origin]),
   [sync_key(Origin, KV) || KV <- KVs1],
   ok.
 
