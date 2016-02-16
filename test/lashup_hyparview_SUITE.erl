@@ -19,7 +19,7 @@
 
 
 
-init_per_suite(_Config) ->
+init_per_suite(Config) ->
   %% this might help, might not...
   os:cmd(os:find_executable("epmd") ++ " -daemon"),
   {ok, Hostname} = inet:gethostname(),
@@ -27,7 +27,7 @@ init_per_suite(_Config) ->
     {ok, _} -> ok;
     {error, {already_started, _}} -> ok
   end,
-  _Config.
+  Config.
 
 end_per_suite(_Config) ->
   _Config.
