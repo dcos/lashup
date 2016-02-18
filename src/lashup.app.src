@@ -4,9 +4,11 @@
   {vsn, "1"},
   {registered, []},
   {applications, [
+                  cowboy,
                   kernel,
                   stdlib,
-                  lager
+                  lager,
+                  riak_dt
                  ]},
   {mod, { lashup_app, []}},
   {env, []}

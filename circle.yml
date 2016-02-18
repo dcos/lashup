@@ -1,4 +1,6 @@
 machine:
+  pre:
+    - echo "127.0.0.1 $(uname -n|cut -f1 -d.) $(uname -n) localhost" | sudo tee /etc/hosts
   environment:
     PATH: ${HOME}/extras/bin:${HOME}/extras/otp/18.1/bin:${PATH}
 dependencies:
@@ -7,24 +9,23 @@ dependencies:
     - ~/.dialyzer_core*
     - ~/.rebar
     - .rebar
+    - _build
+    - .cache
   pre:
     - curl -O -L https://raw.githubusercontent.com/yrashk/kerl/master/kerl && chmod 755 kerl
     - if [ ! -d ~/extras/otp/18.1 ]; then ./kerl build 18.1 18.1; ./kerl install 18.1 ~/extras/otp/18.1; fi
-  override:
-    - ./rebar get-deps
-    - ./rebar build-plt
 
 test:
   override:
-    - ./rebar compile
-    - ./rebar ct
-    - dialyzer --plt .rebar/minuteman_18.1_plt --add_to_plt ebin/ --verbose
-    - ./rebar xref
-    - ./rebar dialyze
+    - ./rebar3 compile
+    - ./rebar3 ct --readable=false
+    - ./rebar3 eunit
+    - ./rebar3 xref
+    - ./rebar3 dialyzer
     - ./elvis rock
+    - ./rebar3 edoc
   post:
     - mkdir -p $CIRCLE_TEST_REPORTS/
-    - mv logs $CIRCLE_TEST_REPORTS
-    - mv log $CIRCLE_TEST_REPORTS
-    - mv ct_run $CIRCLE_TEST_REPORTS
-
+    - mkdir -p $CIRCLE_ARTIFACTS
+    - cp -r _build/test $CIRCLE_TEST_REPORTS
+    - cp -r doc $CIRCLE_ARTIFACTS

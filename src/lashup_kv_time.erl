@@ -2,32 +2,20 @@
 %%% @author sdhillon
 %%% @copyright (C) 2016, <COMPANY>
 %%% @doc
-%%%
+%%% This is eventually going to be the scaffolding for a hybrid logical clock server
+%%% so we can LWW with confidence
+%%% RIGHT NOW IT IS ***DISABLED***
 %%% @end
-%%% Created : 18. Jan 2016 9:27 PM
+%%% Created : 07. Feb 2016 6:23 PM
 %%%-------------------------------------------------------------------
--module(lashup_gm_probe).
+-module(lashup_kv_time).
 -author("sdhillon").
-
-%%--------------------------------------------------------------------
-%% @doc
-%% Probe loop
-%% It goes node by node in the global membership table
-%% and checks if we have a path to them or not
-%% If it doesn't find a path, then it checks if we have a path to the next one or not
-%% Up until it hits a node greater the last node it probed
-
-%% This is really only useful for extended partitions
-%% Where either side has been partitioned from the other for an extended period of time
-%% and
-%% API
-%% @end
-%%--------------------------------------------------------------------
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/0,
+  entries/0]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -39,14 +27,41 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {}).
+
+-record(state, {
+  mc_ref = erlang:error() :: reference(),
+  rtt_entries = #{}
+}).
+-record(rtt_entry, {
+  sent_timestamp = erlang:error() :: pos_integer(),
+  induced_delay = erlang:error() :: pos_integer(),
+  remote_timestamp = erlang:error() :: pos_integer(),
+  recv_timestamp = erlang:error() :: pos_integer()
+}).
+
 -type state() :: #state{}.
 
+
+-define(TICK_SECS, 300).
+-define(MC_TOPIC_TICK, lashup_kv_tick).
+
+
+%%%===================================================================
+%%% API
+%%%===================================================================
+entries() ->
+  gen_server:call(?SERVER, entries).
+
+%%--------------------------------------------------------------------
+%% @doc
+%% Starts the server
+%%
+%% @end
+%%--------------------------------------------------------------------
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
-
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -67,9 +82,10 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  rand:seed(exs1024),
-  State = #state{},
-  schedule_next_probe(),
+  random:seed(lashup_utils:seed()),
+  {ok, Reference} = lashup_gm_mc_events:subscribe([?MC_TOPIC_TICK]),
+  reschedule_tick(5),
+  State = #state{mc_ref = Reference},
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -87,7 +103,8 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
-
+handle_call(entries, _From, State = #state{rtt_entries = Entries}) ->
+  {reply, Entries, State};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
@@ -102,7 +119,6 @@ handle_call(_Request, _From, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
-
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -120,11 +136,15 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
-
-handle_info(do_probe, State) ->
-  maybe_do_probe(State),
-  {noreply, State};
-handle_info(_Info, State) ->
+handle_info(tick, State) ->
+  State1 = handle_tick(State),
+  {noreply, State1};
+handle_info({lashup_gm_mc_event, _Event = #{origin := Origin, ref := Reference, payload := Payload}},
+    State = #state{mc_ref = Reference}) ->
+  State1 = handle_mc_event(Origin, Payload, State),
+  {noreply, State1};
+handle_info(Else, State) ->
+  lager:debug("Unknown info: ~p", [Else]),
   {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -161,67 +181,56 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec(schedule_next_probe() -> ok).
-schedule_next_probe() ->
-  ProbeInterval = lashup_config:min_departition_probe_interval(),
-  schedule_next_probe(ProbeInterval).
+reschedule_tick() ->
+  TickTime = erlang:convert_time_unit(?TICK_SECS, seconds, milli_seconds),
+  reschedule_tick(TickTime).
 
-%% We should make this configurable. It's the decision of when to make the first ping
--spec(schedule_next_probe(Time :: non_neg_integer()) -> ok).
-schedule_next_probe(Time) when is_integer(Time) ->
+reschedule_tick(Time) ->
   RandFloat = random:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
-  timer:send_after(Delay, do_probe),
-  ok.
+  timer:send_after(Delay, tick).
 
--spec(determine_next_probe(ReachableNodes :: [node()], UnreachableNode :: [node()]) -> non_neg_integer()).
-determine_next_probe(ReachableNodes, UnreachableNode) ->
-  %% We want to ensure that component pings the entire other component every 10 minutes?
-  %% But, we don't want to do more than 5 pings / sec as an individual node
-  %% That number is somewhat arbitrary, but let's start there
-  Ratio = length(ReachableNodes) / (length(UnreachableNode) + 1),
-  %% Ratio is how many nodes I must ping over a probe period to fulfill the requirement set forth
-  %% We divide by two, because schedule_next_probe calculates from 1x the time up to 2x the time
-  FullProbePeriod = lashup_config:full_probe_period() / 2,
-  ProbeInterval = FullProbePeriod / Ratio,
-  MinProbeInterval = lashup_config:min_departition_probe_interval(),
-  Interval = max(ProbeInterval, MinProbeInterval),
-  Interval1 = min(Interval, FullProbePeriod),
-  trunc(Interval1).
-
--spec(maybe_do_probe(state()) -> ok).
-maybe_do_probe(_State) ->
-  case lashup_gm_route:get_tree(node()) of
-    {tree, Tree} ->
-      do_probe(Tree);
-    false ->
-      lager:warning("Lashup GM Probe unable to get LSA Tree"),
-      schedule_next_probe(),
-      ok
-  end.
-
--spec(do_probe(lashup_gm_route:tree()) -> ok).
-do_probe(Tree) ->
-   case lashup_gm_route:unreachable_nodes(Tree) of
-    [] ->
-      schedule_next_probe(),
-      ok;
-    UnreachableNodes ->
-      probe_oneof(UnreachableNodes),
-      ReachableNodes = lashup_gm_route:reachable_nodes(Tree),
-      ProbeTime = determine_next_probe(ReachableNodes, UnreachableNodes),
-      schedule_next_probe(ProbeTime),
-      ok
-  end.
-
--spec(probe_oneof(UnreachableNodes :: [node()]) -> ok).
-probe_oneof(UnreachableNodes) ->
-  Idx = rand:uniform(length(UnreachableNodes)),
-  OtherNode = lists:nth(Idx, UnreachableNodes),
-  lashup_hyparview_membership:recommend_neighbor(OtherNode),
-  ok.
+handle_tick(State) ->
+  reschedule_tick(),
+  Payload = #{type => tick, system_time_ms => erlang:system_time(milli_seconds)},
+  lashup_gm_mc:multicast(?MC_TOPIC_TICK, Payload, [loop, {fanout, 1}]),
+  State.
 
 
-
+handle_mc_event(Origin, _Event = #{type := tick, system_time_ms := OriginalTime}, State) ->
+  % Sleep up to 100seconds before replying
+  RandomSleep = trunc(random:uniform() * 100000),
+  Now = erlang:system_time(milli_seconds),
+  Reply = #{
+    type => tick_reply,
+    induced_delay => RandomSleep,
+    original_timestamp => OriginalTime,
+    node_timestamp => Now
+  },
+  MCOptions = [{only_nodes, [Origin]}, loop, {fanout, 1}],
+  timer:apply_after(RandomSleep, lashup_gm_mc, multicast, [?MC_TOPIC_TICK, Reply, MCOptions]),
+  State;
+handle_mc_event(Origin,
+    _Event =
+  #{
+    type := tick_reply,
+    original_timestamp := OriginalTimestamp,
+    induced_delay := InducedDelay,
+    node_timestamp := NodeTimestamp
+    },
+  State = #state{rtt_entries = RTTEntries}) ->
+  Now = erlang:system_time(milli_seconds),
+  Entry =
+  #rtt_entry{
+    sent_timestamp = OriginalTimestamp,
+    induced_delay = InducedDelay,
+    remote_timestamp = NodeTimestamp,
+    recv_timestamp = Now
+  },
+  Entries = maps:get(Origin, RTTEntries, []),
+  EntriesTruncated = lists:sublist(Entries, 99),
+  NewEntries = [Entry|EntriesTruncated],
+  RTTEntries1 = RTTEntries#{Origin => NewEntries},
+  State#state{rtt_entries = RTTEntries1}.
 

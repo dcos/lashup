@@ -4,10 +4,9 @@
 %%% @doc
 %%%
 %%% @end
-%%% Created : 06. Jan 2016 3:37 PM
+%%% Created : 07. Feb 2016 6:16 PM
 %%%-------------------------------------------------------------------
--module(lashup_sup).
--author("sdhillon").
+-module(lashup_kv_sup).
 
 -behaviour(supervisor).
 
@@ -32,8 +31,10 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, { {rest_for_one, 5, 10}, [
-    ?CHILD(lashup_core_sup, supervisor),
-    ?CHILD(lashup_platform_sup, supervisor)
-  ]} }.
+  {ok, {{one_for_all, 5, 10}, [
+    ?CHILD(lashup_kv_events, worker),
+    ?CHILD(lashup_kv, worker)
+    %?CHILD(lashup_kv_time, worker)
+    ]}}.
+
 

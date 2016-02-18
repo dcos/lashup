@@ -9,5 +9,4 @@ ebin
 rel/example_project
 .concrete/DEV_MODE
 .rebar
-
-# Created by .ignore support plugin (hsz.mobi)
+logs/*

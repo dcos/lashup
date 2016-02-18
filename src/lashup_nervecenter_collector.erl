@@ -4,9 +4,9 @@
 %%% @doc
 %%%
 %%% @end
-%%% Created : 18. Jan 2016 9:45 PM
+%%% Created : 08. Feb 2016 7:58 AM
 %%%-------------------------------------------------------------------
--module(lashup_gm_fd).
+-module(lashup_nervecenter_collector).
 -author("sdhillon").
 
 -behaviour(gen_server).
@@ -24,12 +24,13 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {digraph}).
+-record(state, {ref = erlang:error(), rolling_buffer = #{}}).
+-define(TICK_SECS, 10).
+-define(MC_TOPIC_NERVECENTER, nervecenter).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
-
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -61,8 +62,9 @@ start_link() ->
   {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  {ok, Digraph} = lashup_gm:get_digraph(),
-  {ok, #state{digraph = Digraph}}.
+
+  {ok, Ref} = lashup_hyparview_ping_events:subscribe(),
+  {ok, #state{ref = Ref}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -110,7 +112,15 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: #state{}} |
   {noreply, NewState :: #state{}, timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: #state{}}).
-handle_info(_Info, State) ->
+handle_info({lashup_hyparview_ping_events, _Event = #{ref := Ref, ping_data := PingData}},
+    State = #state{ref = Ref, rolling_buffer = RollingBuffer}) ->
+  RollingBuffer1 = maps:merge(RollingBuffer, PingData),
+  {noreply, State#state{rolling_buffer = RollingBuffer1}};
+handle_info(tick, State) ->
+  State1 = handle_tick(State),
+  {noreply, State1};
+handle_info(Info, State) ->
+  lager:debug("Info: ~p", [Info]),
   {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -146,3 +156,41 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+
+reschedule_tick() ->
+  TickTime = erlang:convert_time_unit(?TICK_SECS, seconds, milli_seconds),
+  reschedule_tick(TickTime).
+
+reschedule_tick(Time) ->
+  RandFloat = random:uniform(),
+  Multipler = 1 + round(RandFloat),
+  Delay = Multipler * Time,
+  timer:send_after(Delay, tick).
+
+handle_tick(State = #state{rolling_buffer = RollingBuffer}) ->
+  reschedule_tick(),
+  disseminate_buffer(RollingBuffer),
+  State1 = State#state{rolling_buffer = #{}},
+  State1.
+
+disseminate_buffer(RB) ->
+  %% in native time units
+  %% {node => [{RecordedTime :: integer(), RTT :: integer()}]}
+  RB1 = maps:filter(fun filter_empty/2, RB),
+  RB2 = maps:map(fun rollup/2, RB1),
+  Payload = #{type => rollup, rollup => RB2},
+  lashup_gm_mc:multicast(?MC_TOPIC_NERVECENTER, Payload, [loop, {fanout, 1}]).
+
+filter_empty(_, []) -> false;
+filter_empty(_, _) -> true.
+
+rollup(_Key, Measurements) ->
+  RTTs = [erlang:convert_time_unit(RTT, native, milli_seconds) || {_, RTT} <-  Measurements],
+  SortedRTTs = lists:sort(RTTs),
+  Length = length(RTTs),
+  Median = lists:nth(round(Length/2), SortedRTTs),
+  Mean = round(lists:sum(RTTs) / Length),
+  #{mean => Mean, median => Median}.
+
+

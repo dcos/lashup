@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 06. Jan 2016 3:37 PM
 %%%-------------------------------------------------------------------
--module(lashup_sup).
+-module(lashup_gm_sup).
 -author("sdhillon").
 
 -behaviour(supervisor).
@@ -32,8 +32,12 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, { {rest_for_one, 5, 10}, [
-    ?CHILD(lashup_core_sup, supervisor),
-    ?CHILD(lashup_platform_sup, supervisor)
+  {ok, { {one_for_all, 5, 10}, [
+    ?CHILD(lashup_gm_worker_sup, supervisor),
+    ?CHILD(lashup_gm_events, worker),
+    ?CHILD(lashup_gm_route, worker),
+    ?CHILD(lashup_gm, worker),
+    ?CHILD(lashup_gm_probe, worker),
+    ?CHILD(lashup_gm_mc_sup, supervisor)
   ]} }.
 

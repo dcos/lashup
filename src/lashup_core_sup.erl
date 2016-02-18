@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 06. Jan 2016 3:37 PM
 %%%-------------------------------------------------------------------
--module(lashup_hyparview_sup).
+-module(lashup_core_sup).
 -author("sdhillon").
 
 -behaviour(supervisor).
@@ -33,10 +33,10 @@ start_link() ->
 
 init([]) ->
   {ok, { {rest_for_one, 5, 10}, [
+    ?CHILD(lashup_hyparview_ping_events, worker),
     ?CHILD(lashup_hyparview_events, worker),
+    ?CHILD(lashup_hyparview_ping_handler, worker),
     ?CHILD(lashup_hyparview_membership, worker),
-    ?CHILD(lashup_gm_mc, worker),
-    ?CHILD(lashup_gm, worker),
-    ?CHILD(lashup_gm_fd, worker)
+    ?CHILD(lashup_gm_sup, supervisor)
   ]} }.
 

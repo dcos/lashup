@@ -10,30 +10,54 @@
 -author("sdhillon").
 
 %% API
--export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2, get_dcos_ip/0, erlang_nodes/1, maybe_poll_for_master_nodes/0]).
+-export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
+  get_dcos_ip/0, erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2,
+  shuffle_list/1]).
 
--record(window, {samples = [], window_time = 0}).
+-record(window, {
+  samples = [] :: list(integer()),
+  window_time = 0 :: non_neg_integer()}).
 
+-type window() :: #window{}.
+
+-export_type([window/0]).
+
+-spec(seed() -> random:ran()).
 seed() ->
   {erlang:phash2([node()]),
   erlang:monotonic_time(),
   erlang:unique_integer()}.
 
-
+-spec shuffle_list(List, Seed :: random:ran()) -> List1 when
+  List :: [T, ...],
+  List1 :: [T, ...],
+  T :: term().
 shuffle_list(List, FixedSeed) ->
   {_, PrefixedList} =
     lists:foldl(fun(X, {SeedState, Acc}) ->
       {N, SeedState1} = random:uniform_s(1000000, SeedState),
-      {SeedState1, [{N, X}|Acc]}
+      {SeedState1, [{N, X} | Acc]}
                 end,
       {FixedSeed, []},
       List),
   PrefixedListSorted = lists:sort(PrefixedList),
   [Value || {_N, Value} <- PrefixedListSorted].
 
+
+-spec shuffle_list(List) -> List1 when
+  List :: [T, ...],
+  List1 :: [T, ...],
+  T :: term().
+shuffle_list(List) ->
+  PrefixedList = [{rand:uniform(1000000), Item} || Item <- List],
+  PrefixedListSorted = lists:sort(PrefixedList),
+  [Value || {_N, Value} <- PrefixedListSorted].
+
+-spec(new_window(WindowTime :: non_neg_integer()) -> window()).
 new_window(WindowTime) ->
   #window{window_time = WindowTime}.
 
+-spec(add_tick(window()) -> window()).
 add_tick(Window = #window{window_time = WindowTime, samples = Samples}) ->
   Sample = erlang:monotonic_time(milli_seconds),
   Now = erlang:monotonic_time(milli_seconds),
@@ -41,11 +65,13 @@ add_tick(Window = #window{window_time = WindowTime, samples = Samples}) ->
   {Samples2, _} = lists:splitwith(fun(X) -> X > Now - WindowTime end, Samples1),
   Window#window{samples = Samples2}.
 
+-spec(count_ticks(window()) -> non_neg_integer()).
 count_ticks(_Window = #window{window_time = WindowTime, samples = Samples}) ->
   Now = erlang:monotonic_time(milli_seconds),
   {Samples1, _} = lists:splitwith(fun(X) -> X > Now - WindowTime end, Samples),
   length(Samples1).
 
+-spec(compare_vclocks(V1 :: riak_dt_vclock:vclock(), V2 :: riak_dt_vclock:vclock()) -> gt | lt | equal | concurrent).
 compare_vclocks(V1, V2) ->
   %% V1 dominates V2
   DominatesGT = riak_dt_vclock:dominates(V1, V2),
@@ -62,6 +88,7 @@ compare_vclocks(V1, V2) ->
       concurrent
   end.
 
+-spec(get_dcos_ip() -> false | inet:ip4_address()).
 get_dcos_ip() ->
   case inet:parse_ipv4_address(os:cmd("/opt/mesosphere/bin/detect_ip")) of
     {ok, IP} ->
@@ -70,6 +97,7 @@ get_dcos_ip() ->
       false
   end.
 
+-spec(maybe_poll_for_master_nodes() -> [node()]).
 maybe_poll_for_master_nodes() ->
   IPs = inet_res:lookup("master.mesos", in, a, [], 1000),
   Nodes = [erlang_nodes(IP) || IP <- IPs],
@@ -80,6 +108,7 @@ maybe_poll_for_master_nodes() ->
   FlattenedNodesSet.
 
 
+-spec(erlang_nodes(IP :: inet:ip4_address()) -> [node()]).
 erlang_nodes(IP) ->
   case net_adm:names(IP) of
     {error, _} ->
@@ -137,4 +166,32 @@ wait_for_name(Socket, Acc) ->
     _ ->
       Acc
   end.
+
+-spec(nodekey(Node :: node(), Seed :: term()) -> {integer(), Node :: node()}).
+nodekey(Node, Seed) ->
+  Hash = erlang:phash2({Node, Seed}),
+  {Hash, Node}.
+
+-spec(subtract(List1, List2) -> Set when
+  List1 :: [Type, ...],
+  List2 :: [Type, ...],
+  Set :: ordsets:ordset(Type),
+  Type :: term()).
+
+%% @doc
+%% This is equivalent to lists:subtract
+%% This comes from a bunch of empirical benchmarking
+%% That for small sets, it's cheaper to do ordsets:from_list
+%% and use that subtraction method
+%% It returns a sorted set back
+%% @end
+subtract(List1, List2) ->
+  List1Set = ordsets:from_list(List1),
+  List2Set = ordsets:from_list(List2),
+  ordsets:subtract(List1Set, List2Set).
+
+
+
+
+
 

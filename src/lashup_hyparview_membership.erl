@@ -16,7 +16,11 @@
   start_link/0,
   get_active_view/0,
   get_passive_view/0,
-  poll_for_master_nodes/0
+  poll_for_master_nodes/0,
+  do_probe/1,
+  ping_failed/1,
+  recognize_pong/1,
+  recommend_neighbor/1
 ]).
 
 %% gen_server callbacks
@@ -51,28 +55,62 @@
 
 -define(SERVER, ?MODULE).
 
--record(monitor, {monitor_ref, node}).
+-record(monitor, {monitor_ref :: reference(), node :: node()}).
+
+-type monitor() :: #monitor{}.
 
 -record(state, {
-  active_view = ordsets:new(),
-  passive_view = ordsets:new(),
-  monitors = [],
+  active_view = ordsets:new() :: ordsets:ordset(),
+  passive_view = ordsets:new() :: ordsets:ordset(),
+  monitors = [] :: [monitor()],
   fixed_seed,
-  idx = 1,
+  idx = 1 :: pos_integer(),
   unfilled_active_set_count = 0,
-  init_time =  erlang:error(init_time_unset),
+  init_time = erlang:error(init_time_unset) :: integer(),
   messages = [],
   join_window,
-  pings_in_flight = orddict:new(),
-  ping_idx = 1,
-  joined = false,
-  extra_masters = []
+  ping_idx = 1 :: pos_integer(),
+  joined = false :: boolean(),
+  extra_masters = [] :: [node()]
 }).
+
+-type state() :: state().
+
+%% TODO: Make map types better defined
+%% We probably want to define a partial of the map
+
+-type join_success() :: map().
+-type join() :: map().
+-type forward_join() :: map().
+-type disconnect() :: map().
+-type neighbor() :: map().
+-type neighbor_deny() :: map().
+-type neighbor_accept() :: map().
+-type shuffle() :: map().
+-type shuffle_reply() :: map().
+-type hyparview_message() :: join_success() | join() | forward_join() | disconnect() | neighbor() | neighbor_deny() |
+                             neighbor_accept() | shuffle() | shuffle_reply().
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
+%% The recognize ping function tells the hyparview membership server that
+%% this node has us in their active view
+recognize_pong(Pong) ->
+  gen_server:cast(?SERVER, {recognize_pong, Pong}).
+
+%% This is a way for lashup_gm_probe to recommend a neighbor
+%% if it finds a neighbor that's outside of our reachability graph
+recommend_neighbor(Node) ->
+  gen_server:cast(?SERVER, {recommend_neighbor, Node}).
+
+%% Pings the node immediately.
+do_probe(Node) ->
+  gen_server:cast(?SERVER, {do_probe, Node}).
+
+ping_failed(Node) ->
+  gen_server:cast(?SERVER, {ping_failed, Node}).
 
 get_active_view() ->
   gen_server:call(?SERVER, get_active_view).
@@ -107,13 +145,12 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(Args :: term()) ->
-  {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
+  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
   random:seed(erlang:phash2([node()]),
     erlang:monotonic_time(),
     erlang:unique_integer()),
-
   %% This seed is a fixed seed used for shuffling the list
   FixedSeed = seed(),
   MyPid = self(),
@@ -132,7 +169,9 @@ init([]) ->
 
   %% Only poll every 5 minutes beyond that
   {ok, _} = timer:apply_interval(300000, ?MODULE, poll_for_master_nodes, []),
-  {ok, #state{passive_view = contact_nodes([]), fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window}}.
+  State = #state{passive_view = contact_nodes([]),
+    fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window},
+  {ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -142,26 +181,27 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: #state{}) ->
-  {reply, Reply :: term(), NewState :: #state{}} |
-  {reply, Reply :: term(), NewState :: #state{}, timeout() | hibernate} |
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
-  {stop, Reason :: term(), NewState :: #state{}}).
-
+  State :: state()) ->
+  {reply, Reply :: term(), NewState :: state()} |
+  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
+  {stop, Reason :: term(), NewState :: state()}).
+handle_call(stop, _From, State) ->
+  {stop, normal, State};
 handle_call({do_connect, Node}, _From, State) when is_atom(Node) ->
-  State1 = add_node_active_view(Node, State),
-  {reply, State1#state.active_view, check_state(State1)};
+  send_neighbor_to(5000, Node, high),
+  {reply, ok, State};
 handle_call(get_active_view, _From, State = #state{active_view = ActiveView}) ->
   {reply, ActiveView, State};
 handle_call(get_passive_view, _From, State = #state{passive_view = PassiveView}) ->
   {reply, PassiveView, State};
-handle_call(try_shuffle, _From, State)  ->
+handle_call(try_shuffle, _From, State) ->
   NewDelay = try_shuffle(State),
-  {reply, NewDelay, State};
-handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+  {reply, NewDelay, State}.
+
+%% No handler here, because no one should ever call us off-node, and it's indicative of a bug
 
 %%--------------------------------------------------------------------
 %% @private
@@ -170,79 +210,32 @@ handle_call(_Request, _From, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_cast(Request :: term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 %% We generated a timer (with a ref) when we did the join with a timeout
 %% We get passed back that ref, and now we need to delete it
 handle_cast({do_probe, Node}, State) ->
   State1 = handle_do_probe(Node, State),
   {noreply, check_state(State1)};
-handle_cast(_JoinSuccess = #{message := join_success, sender := Sender, ref := Ref, passive_view := RemotePassiveView}, State) ->
-  State1 = add_node_active_view(Sender, State),
-  State2 =
-  case timer:cancel(Ref) of
-    {ok, cancel} ->
-      lager:debug("Node ~p successfully joined node ~p", [node(), Sender]),
-      lists:foldl(fun maybe_add_node_passive_view/2, State, RemotePassiveView);
-    {error, _Reason} ->
-      lager:info("Received late join success from Node: ~p", [Sender]),
-      State1
-  end,
-  State3 = State2#state{joined = true},
-  push_state(State3),
-  {noreply, check_state(State3)};
-
-handle_cast(_Join = #{message := join, sender := Node, ref := Ref}, State) ->
-  lager:debug("Saw join from ~p", [Node]),
-  State1 = handle_join(Node, State, Ref),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(ForwardJoin = #{message := forward_join}, State) ->
-  State1 = handle_forward_join(ForwardJoin, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(Disconnect = #{message := disconnect}, State) ->
-  State1 = handle_disconnect(Disconnect, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(Neighbor = #{message := neighbor}, State) ->
-  State1 = handle_neighbor(Neighbor, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(_NeighborDeny = #{message := neighbor_deny, sender := Sender, ref := Ref}, State  = #state{active_view = ActiveView, passive_view = PassiveView}) ->
-  timer:cancel(Ref),
-  lager:debug("Denied from joining ~p, while active view ~p, passive view: ~p", [Sender, ActiveView, PassiveView]),
-  push_state(State),
-  schedule_disconnect(Sender),
-  {noreply, check_state(State)};
-handle_cast(_NeighborAccept = #{message := neighbor_accept, sender := Sender, ref := Ref}, State) ->
-  timer:cancel(Ref),
-  State1 = add_node_active_view(Sender, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(Shuffle = #{message := shuffle}, State) ->
-  State1 = handle_shuffle(Shuffle, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(ShuffleReply = #{message := shuffle_reply}, State) ->
-  State1 = handle_shuffle_reply(ShuffleReply, State),
-  push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast(GossipMessage = #{message := gossip}, State) ->
-  State1 = handle_gossip_message(GossipMessage, State),
-  {noreply, check_state(State1)};
-handle_cast(PingMessage = #{message := ping}, State) ->
-  handle_ping(PingMessage, State),
+handle_cast(Message = #{message := _}, State) ->
+  State1 = handle_message_cast(Message, State),
+  {noreply, State1};
+handle_cast({recognize_pong, Pong}, State) ->
+  handle_recognize_pong(Pong, State),
   {noreply, State};
-handle_cast(PongMessage = #{message := pong}, State) ->
-  State1 = handle_pong(PongMessage, State),
+handle_cast({ping_failed, Node}, State) ->
+  State1 = handle_ping_failed(Node, State),
+  push_state(State1),
   {noreply, check_state(State1)};
 handle_cast({masters, List}, State) ->
   MasterSet = ordsets:del_element(node(), List),
   State1 = State#state{extra_masters = MasterSet},
   {noreply, check_state(State1)};
+handle_cast({recommend_neighbor, Node}, State) ->
+  handle_recommend_neighbor(Node, State),
+  {noreply, State};
 handle_cast(Request, State) ->
   lager:debug("Received unknown cast: ~p", [Request]),
   {noreply, check_state(State)}.
@@ -257,10 +250,10 @@ handle_cast(Request, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: #state{}) ->
-  {noreply, NewState :: #state{}} |
-  {noreply, NewState :: #state{}, timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_info(Info :: timeout() | term(), State :: state()) ->
+  {noreply, NewState :: state()} |
+  {noreply, NewState :: state(), timeout() | hibernate} |
+  {stop, Reason :: term(), NewState :: state()}).
 %% It's likely just that someone connected to us, and that's okay
 handle_info(DownMessage = {'DOWN', _, _, _, _}, State) ->
   State1 = handle_down_message(DownMessage, State),
@@ -270,7 +263,8 @@ handle_info(DownMessage = {'DOWN', _, _, _, _}, State) ->
 %% In fact, the network can get into (healthy) cases where it's not possible
 %% Like running fewer than the active view size count nodes
 %% So, only neighbor if more than 25% of our active view is open.
-handle_info(maybe_neighbor, State = #state{active_view = ActiveView}) when length(ActiveView) >= ?ACTIVE_VIEW_SIZE * 0.75 ->
+handle_info(maybe_neighbor, State = #state{active_view = ActiveView}) when length(
+  ActiveView) >= ?ACTIVE_VIEW_SIZE * 0.75 ->
   %% Ignore this, because my active view is full
   reschedule_maybe_neighbor(),
   State1 = State#state{unfilled_active_set_count = 0},
@@ -300,9 +294,6 @@ handle_info({tried_neighbor, Node}, State = #state{passive_view = PassiveView}) 
 handle_info(ping_rq, State) ->
   State1 = handle_ping_rq(State),
   {noreply, check_state(State1)};
-handle_info({ping_failed, Node}, State) ->
-  State1 = handle_ping_failed(Node, State),
-  {noreply, check_state(State1)};
 handle_info({maybe_disconnect, Node}, State) ->
   State1 = handle_maybe_disconnect(Node, State),
   {noreply, check_state(State1)};
@@ -322,7 +313,7 @@ handle_info(Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: #state{}) -> term()).
+  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:error("Terminating with reason ~p, and state: ~p", [Reason, State]),
   ok.
@@ -335,29 +326,58 @@ terminate(Reason, State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
   Extra :: term()) ->
-  {ok, NewState :: #state{}} | {error, Reason :: term()}).
+  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+%% Message Dispatch functions
 
+-spec(handle_message_cast(hyparview_message(), State :: state()) -> state()).
+handle_message_cast(JoinSuccess = #{message := join_success}, State) ->
+  State1 = handle_join_success(JoinSuccess, State),
+  check_state(State1);
+handle_message_cast(_Join = #{message := join, sender := Node, ref := Ref}, State) ->
+  State1 = handle_join(Node, State, Ref),
+  check_state(State1);
+handle_message_cast(ForwardJoin = #{message := forward_join}, State) ->
+  State1 = handle_forward_join(ForwardJoin, State),
+  push_state(State1),
+  check_state(State1);
+handle_message_cast(Disconnect = #{message := disconnect}, State) ->
+  State1 = handle_disconnect(Disconnect, State),
+  push_state(State1),
+  check_state(State1);
+handle_message_cast(Neighbor = #{message := neighbor}, State) ->
+  State1 = handle_neighbor(Neighbor, State),
+  push_state(State1),
+  check_state(State1);
+handle_message_cast(NeighborDeny = #{message := neighbor_deny}, State) ->
+  State1 = handle_neighbor_deny(NeighborDeny, State),
+  check_state(State1);
+handle_message_cast(NeighborAccept = #{message := neighbor_accept}, State) ->
+  State1 = handle_neighbor_accept(NeighborAccept, State),
+  check_state(State1);
+handle_message_cast(Shuffle = #{message := shuffle}, State) ->
+  State1 = handle_shuffle(Shuffle, State),
+  check_state(State1);
+handle_message_cast(ShuffleReply = #{message := shuffle_reply}, State) ->
+  State1 = handle_shuffle_reply(ShuffleReply, State),
+  check_state(State1).
 
+%% RESCHEDULING Functions
 %% Ping every one of my neighbors at least every second
-
 reschedule_ping() ->
   reschedule_ping(100).
-
 reschedule_ping(Time) ->
   RandFloat = random:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
   timer:send_after(Delay, ping_rq).
-
-
 
 reschedule_maybe_neighbor() ->
   reschedule_maybe_neighbor(?NEIGHBOR_INTERVAL).
@@ -369,12 +389,12 @@ reschedule_maybe_neighbor(Time) ->
 
 reschedule_join() ->
   reschedule_join(?JOIN_INTERVAL).
-
 reschedule_join(BaseTime) ->
   RandFloat = random:uniform(),
   Multipler = 1 + round(RandFloat),
   timer:send_after(Multipler * BaseTime, try_join).
 
+%%% Rescheduling functions
 
 
 choose_node(Nodes) when length(Nodes) > 0 ->
@@ -382,30 +402,30 @@ choose_node(Nodes) when length(Nodes) > 0 ->
   NodeIdx = random:uniform(Length),
   lists:nth(NodeIdx, Nodes).
 
--spec try_do_join(State :: #state{}) -> error | ok.
+%% JOIN CODE
+-spec try_do_join(State :: state()) -> error | ok.
 try_do_join(State) ->
   case do_join(State) of
     ok ->
-      ok;
-    true ->
       ok;
     _ ->
       reschedule_join(),
       error
   end.
 
+-spec(do_join(State :: state()) -> ok | {error, Reason :: term()}).
 do_join(State) ->
   ContactNodes = contact_nodes(State),
   lager:debug("Contact nodes found during join: ~p", [ContactNodes]),
   case ContactNodes of
     [] ->
-      false;
+      {error, no_contact_nodes};
     _ ->
       Node = choose_node(ContactNodes),
       try_connect_then_join(Node)
   end.
 
--spec try_connect_then_join(node()) -> boolean().
+-spec(try_connect_then_join(node()) -> ok | {error, Reason :: term()}).
 try_connect_then_join(Node) ->
   case net_adm:ping(Node) of
     pong ->
@@ -414,17 +434,10 @@ try_connect_then_join(Node) ->
       {error, could_not_connect}
   end.
 
--spec try_join(node()) -> boolean().
+-spec(try_join(node()) -> ok).
 try_join(Node) ->
   {ok, Ref} = timer:send_after(1000, join_failed),
-  case gen_server:cast({?SERVER, Node}, #{message => join, sender => node(), ref => Ref}) of
-    ok ->
-      lager:debug("Maybe joined: ~p", [Node]),
-      ok;
-    Else ->
-      lager:warning("Error trying to join node ~p: ~p", [Node, Else]),
-      {error, {unknown, Else}}
-  end.
+  gen_server:cast({?SERVER, Node}, #{message => join, sender => node(), ref => Ref}).
 
 
 %% This is ridiculously inefficient on the order of O(N!),
@@ -447,10 +460,11 @@ trim_ordset_to(Ordset, _Size, DroppedItems) ->
   {Ordset, DroppedItems}.
 
 
-
-
+-spec(handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveView}, Ref)
-    when Node =/= node()->
+  when Node =/= node() ->
+  lager:debug("Saw join from ~p", [Node]),
+  State1 =
   case lashup_utils:count_ticks(JoinWindow) of
     Num when length(ActiveView) == ?ACTIVE_VIEW_SIZE andalso Num < 25 ->
       really_handle_join(Node, State, Ref);
@@ -461,91 +475,107 @@ handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveV
     WindowSize ->
       lager:warning("Throttling joins, window size: ~p, active view size: ~p", [WindowSize, length(ActiveView)]),
       State
-  end.
+  end,
+  push_state(State1),
+  State1;
 
-really_handle_join(Node, State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors, join_window = JoinWindow}, Ref) ->
-  case try_add_node_to_active_view(Node, ActiveView, PassiveView, Monitors) of
-    {ok, {ActiveView1, PassiveView1, Monitors1}} ->
+handle_join(_, State, _) -> State.
+
+-spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
+really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
+  case try_add_node_to_active_view(Node, State) of
+    {ok, NewState = #state{active_view = ActiveView, passive_view = PassiveView}} ->
       ARWL = lashup_config:arwl(),
-      Fanout = ordsets:del_element(Node, ActiveView1),
+      Fanout = ordsets:del_element(Node, ActiveView),
       gen_server:abcast(Fanout, ?SERVER, #{message => forward_join, node => Node, ttl => ARWL, sender => node()}),
-      Reply = #{message => join_success, sender => node(), ref => Ref, passive_view => PassiveView1},
+      Reply = #{message => join_success, sender => node(), ref => Ref, passive_view => PassiveView},
       gen_server:cast({?SERVER, Node}, Reply),
       JoinWindow1 = lashup_utils:add_tick(JoinWindow),
-      State#state{active_view = ActiveView1, passive_view = PassiveView1, monitors = Monitors1, join_window = JoinWindow1};
-    error ->
-      State
+      NewState#state{join_window = JoinWindow1};
+    {error, NewState} ->
+      NewState
   end.
 
+-spec(handle_join_success(join_success(), state()) -> state()).
+handle_join_success(_JoinSuccess =
+  #{message := join_success, sender := Sender, ref := Ref, passive_view := RemotePassiveView}, State) ->
+  timer:cancel(Ref),
+  State1 = lists:foldl(fun maybe_add_node_passive_view/2, State, RemotePassiveView),
+  State3 =
+  case try_add_node_to_active_view(Sender, State1) of
+    {ok, State2} ->
+      State2#state{joined = true};
+    {error, State2} ->
+      State2
+  end,
+  push_state(State3),
+  State3.
 
+-spec(trim_active_view(Size :: non_neg_integer(), State :: state()) -> state()).
+trim_active_view(Size, State = #state{active_view = ActiveView}) ->
+  {_, DroppedNodes} = trim_ordset_to(ActiveView, Size),
+  State1 = lists:foldl(fun disconnect_node/2, State, DroppedNodes),
+  case DroppedNodes of
+    [] ->
+      ok;
+    _ ->
+      lager:debug("Removing ~p from active view", [DroppedNodes])
+  end,
+  State1.
 
-trim_active_view(ActiveView, PassiveView, Monitors, Size) ->
-  {ActiveView1, DroppedNodes} = trim_ordset_to(ActiveView, Size),
-  Monitors1 = lists:foldl(
-    fun(Node, Acc) -> remove_monitor(Node, Acc) end, Monitors, DroppedNodes),
-  gen_server:abcast(DroppedNodes, ?SERVER, #{message => disconnect, sender => node()}),
-  PassiveView1 = ordsets:union(PassiveView, DroppedNodes),
-  {ActiveView1, PassiveView1, Monitors1}.
-
-try_add_node_to_active_view(Node, ActiveView, PassiveView, Monitors) when Node =/= node() ->
+-spec(try_add_node_to_active_view(node(), state()) -> {ok, state()} | {error, state()}).
+try_add_node_to_active_view(Node, State) when Node =/= node() ->
   %% There is one critical component here -
   %% We have to return a non-error code once we decide to trim from the active view
   %% If we don't, it could end with an asymmetrical graph
   case net_kernel:connect_node(Node) of
     true ->
-      {ActiveView1, PassiveView1, Monitors1} = trim_active_view(ActiveView, PassiveView, Monitors, ?ACTIVE_VIEW_SIZE - 1),
+      State1 = trim_active_view(?ACTIVE_VIEW_SIZE - 1, State),
+      Monitors1 = State1#state.monitors,
+      ActiveView1 = State1#state.active_view,
+      PassiveView1 = State1#state.passive_view,
       Monitors2 = ensure_monitor(Node, Monitors1),
       ActiveView2 = ordsets:add_element(Node, ActiveView1),
       PassiveView2 = ordsets:del_element(Node, PassiveView1),
-      {ok, {ActiveView2, PassiveView2, Monitors2}};
-    false ->
-      lager:warning("Received join from node ~p, but could not connect back to it", [Node]),
-      error
-  end.
-
-
-add_node_active_view(Node, State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) when Node =/= node() ->
-  {ActiveViewNew, PassiveViewNew, MonitorsNew} = case ordsets:is_element(Node, ActiveView) of
-    true ->
-      {ActiveView, PassiveView, Monitors};
-    false ->
-      lager:debug("Adding node ~p to active view", [Node]),
-      case try_add_node_to_active_view(Node, ActiveView, PassiveView, Monitors) of
-        {ok, {ActiveView1, PassiveView1, Monitors1}} ->
-          {ActiveView1, PassiveView1, Monitors1};
-        error ->
-          {ActiveView, PassiveView, Monitors}
-      end
-  end,
-  State#state{active_view = ActiveViewNew, passive_view = PassiveViewNew, monitors = MonitorsNew};
-add_node_active_view(_Node, State) ->
-  State.
-
-maybe_add_node_passive_view(Node, State = #state{active_view = ActiveView, passive_view = PassiveView}) when Node =/= node() ->
-  {ActiveViewNew, PassiveViewNew} = case {ordsets:is_element(Node, ActiveView), ordsets:is_element(Node, PassiveView)} of
-    {false, false} ->
-      {PassiveView1, _} = trim_ordset_to(PassiveView, ?PASSIVE_VIEW_SIZE - 1),
-      PassiveView2 = ordsets:add_element(Node, PassiveView1),
-      {ActiveView, PassiveView2};
+      State2 = State1#state{active_view = ActiveView2, passive_view = PassiveView2, monitors = Monitors2},
+      {ok, State2};
     _ ->
-      {ActiveView, PassiveView}
-  end,
+      lager:warning("Received join from node ~p, but could not connect back to it", [Node]),
+      {error, State}
+  end;
+
+try_add_node_to_active_view(_Node, State) ->
+  {error, State}.
+
+maybe_add_node_passive_view(Node, State = #state{active_view = ActiveView, passive_view = PassiveView})
+    when Node =/= node() ->
+  {ActiveViewNew, PassiveViewNew} = case {ordsets:is_element(Node, ActiveView), ordsets:is_element(Node,
+    PassiveView)} of
+                                      {false, false} ->
+                                        {PassiveView1, _} = trim_ordset_to(PassiveView, ?PASSIVE_VIEW_SIZE - 1),
+                                        PassiveView2 = ordsets:add_element(Node, PassiveView1),
+                                        {ActiveView, PassiveView2};
+                                      _ ->
+                                        {ActiveView, PassiveView}
+                                    end,
   State#state{active_view = ActiveViewNew, passive_view = PassiveViewNew};
 maybe_add_node_passive_view(_Node, State) ->
   State.
 
 handle_forward_join(_ForwardJoin = #{ttl := 0, node := Node}, State) ->
-  add_node_active_view(Node, State);
+  {_, State1} = try_add_node_to_active_view(Node, State),
+  State1;
 handle_forward_join(_ForwardJoin = #{node := Node}, State = #state{active_view = []}) ->
-  add_node_active_view(Node, State);
+  {_, State1} = try_add_node_to_active_view(Node, State),
+  State1;
 handle_forward_join(ForwardJoin = #{node := Node, ttl := TTL}, State) ->
   PRWL = lashup_config:prwl(),
   State1 = case TTL of
-    PRWL ->
-      maybe_add_node_passive_view(Node, State);
-    _ ->
-      State
-  end,
+             PRWL ->
+               maybe_add_node_passive_view(Node, State);
+             _ ->
+               State
+           end,
   forward_forward_join(ForwardJoin, State1),
   State1.
 
@@ -564,7 +594,9 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}
 %% Maybe we should disconnect from the node at this point?
 %% I'm unsure, because if another service is using hyparview for peer sampling
 %% We could break the TCP connection before it's ready
-handle_disconnect(_Disconnect = #{sender := Sender}, State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
+-spec(handle_disconnect(disconnect(), state()) -> state()).
+handle_disconnect(_Disconnect = #{sender := Sender},
+    State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
   lager:info("Node ~p received disconnect from ~p", [node(), Sender]),
   MonitorRef = node_to_monitor_ref(Sender, Monitors),
   Monitors1 = remove_monitor(MonitorRef, Monitors),
@@ -574,7 +606,8 @@ handle_disconnect(_Disconnect = #{sender := Sender}, State = #state{active_view 
   State#state{active_view = ActiveView1, passive_view = PassiveView1, monitors = Monitors1}.
 
 
-handle_down_message(_DownMessage = {'DOWN', MonitorRef, process, _Info, Reason}, State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
+handle_down_message(_DownMessage = {'DOWN', MonitorRef, process, _Info, Reason},
+    State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
   case monitor_ref_to_node(MonitorRef, Monitors) of
     false ->
       State;
@@ -597,8 +630,8 @@ maybe_neighbor(State = #state{joined = false}) ->
   %% Probably better to mark myself as joined
   reschedule_maybe_neighbor(500),
   State#state{joined = true};
-maybe_neighbor(State = #state{passive_view = PassiveView, active_view = ActiveView, fixed_seed = FixedSeed, idx = Idx, unfilled_active_set_count = Count}) ->
-  case {ActiveView, PassiveView} of
+maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active_set_count = Count}) ->
+  case {State#state.active_view, State#state.passive_view} of
     %% Both views are empty
     %% This shouldn't happen
     %% Hydrate the passive view with contact nodes, and reschedule immediately
@@ -609,7 +642,7 @@ maybe_neighbor(State = #state{passive_view = PassiveView, active_view = ActiveVi
     %% We have nodes in the active view, but none in the passive view
     %% This is concerning, but not necessarily bad
     %% Let's try to reconnect to the contact nodes
-    {_ActiveView, []} ->
+    {ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
       lager:warning("Trying to connect to connect to node from passive view, but passive view empty"),
       ContactNodes = ordsets:from_list(contact_nodes(State)),
@@ -625,24 +658,27 @@ maybe_neighbor(State = #state{passive_view = PassiveView, active_view = ActiveVi
       State#state{idx = Idx + 1, unfilled_active_set_count = Count + 1};
     {_ActiveView, PassiveView} ->
       reschedule_maybe_neighbor(2000),
-      State1 = maybe_gossip_for_neighbor(State),
-      maybe_gm_neighbor(2000, State1),
+      maybe_gm_neighbor(2000, State),
       send_neighbor(2000, PassiveView, low, Idx, FixedSeed),
-      State1#state{idx = Idx + 1, unfilled_active_set_count = Count + 1}
+      State#state{idx = Idx + 1, unfilled_active_set_count = Count + 1}
   end.
 
 %% Timeout is actually a minimum time
 maybe_gm_neighbor(Timeout, _State = #state{unfilled_active_set_count = Count})
-    when Count rem 5 == 0 andalso Count > 3 ->
+  when Count rem 5 == 0 andalso Count > 3 ->
+  %% This is to ensure that there isn't a dependency loop between us and gm
   case catch lashup_gm:get_neighbor_recommendations(?ACTIVE_VIEW_SIZE) of
     {ok, Node} ->
+      lager:info("Get Neighbors Successful: ~p", [Node]),
       send_neighbor_to(Timeout, Node, low),
       Node;
-    _ ->
+    Error ->
+      lager:info("Get Neighbors Unsuccessful: ~p", [Error]),
       ok
   end;
 maybe_gm_neighbor(_Timeout, _State) ->
   ok.
+
 send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(PassiveView) > 0 ->
   ShuffledPassiveView = shuffle_list(PassiveView, FixedSeed),
   RealIdx = Idx rem length(ShuffledPassiveView) + 1,
@@ -650,122 +686,87 @@ send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(Passiv
   send_neighbor_to(Timeout, Node, Priority),
   Node.
 
-%% TODO: Use lashup_gm's global view to choose the neighbor rather than this gossip jank
-send_neighbor_to(Timeout, Node, Priority) ->
+-spec(send_neighbor_to(Timeout :: non_neg_integer(), Node :: node(), Priority :: high | low) -> ok).
+send_neighbor_to(Timeout, Node, Priority) when is_integer(Timeout) ->
   lager:debug("Sending neighbor to: ~p", [Node]),
-  Ref = timer:send_after(Timeout*3, {tried_neighbor, Node}),
+  Ref = timer:send_after(Timeout * 3, {tried_neighbor, Node}),
   gen_server:cast({?SERVER, Node}, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
 
+-spec(handle_neighbor(neighbor(), state()) -> state()).
 handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref}, State = #state{active_view = ActiveView})
-    when length(ActiveView) == ?ACTIVE_VIEW_SIZE ->
+  when length(ActiveView) == ?ACTIVE_VIEW_SIZE ->
   %% The Active neighbor list is full
   lager:info("Denied neighbor request from ~p because active view full", [Sender]),
-  gen_server:cast({?SERVER, Sender}, #{message => neighbor_deny, sender => node(), ref => Ref}),
+  PassiveView = State#state.passive_view,
+  gen_server:cast({?SERVER, Sender},
+    #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView}),
   State;
 
 %% Either this is a high priority request
 %% Or I have an empty slot in my active view list
-handle_neighbor(_Neighbor = #{sender := Sender, ref := Ref}, State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
-  {ActiveViewNew, PassiveViewNew, MonitorsNew} =
-    case try_add_node_to_active_view(Sender, ActiveView, PassiveView, Monitors) of
-    {ok, {ActiveView1, PassiveView1, Monitors1}} ->
+handle_neighbor(_Neighbor = #{sender := Sender, ref := Ref}, State) ->
+  case try_add_node_to_active_view(Sender, State) of
+    {ok, NewState} ->
       gen_server:cast({?SERVER, Sender}, #{message => neighbor_accept, sender => node(), ref => Ref}),
-      {ActiveView1, PassiveView1, Monitors1};
-    error ->
+      NewState;
+    {error, NewState = #state{passive_view = PassiveView}} ->
       lager:warning("Failed to add neighbor ~p to active view on neighbor message", [Sender]),
-      gen_server:cast({?SERVER, Sender}, #{message => neighbor_deny, sender => node(), ref => Ref}),
-      {ActiveView, PassiveView, Monitors}
-  end,
-  State#state{active_view = ActiveViewNew, passive_view = PassiveViewNew, monitors = MonitorsNew}.
+      NeighborDeny = #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView},
+      gen_server:cast({?SERVER, Sender}, NeighborDeny),
+      NewState
+  end.
 
-%% Gossip every 10 protocol periods, but wait at least 3 protocol periods before sending a randomize gossip
-%% This should only be called if we don't have enough neighbors
-maybe_gossip_for_neighbor(State = #state{unfilled_active_set_count = Count, active_view = ActiveView})
-    when Count rem 7 == 0 andalso Count > 3 ->
-  lager:debug("Gossiping for neighbor"),
-  ActiveViewSize = length(ActiveView),
-  Payload = #{message => unfilled_active_view, active_view_size => ActiveViewSize, node => node()},
-  GossipMessage = wrap_gossip_message(Payload, State),
-  do_randomized_gossip(GossipMessage, ActiveView),
-  State;
+-spec(handle_neighbor_accept(neighbor_accept(), state()) -> state()).
+handle_neighbor_accept(_NeighborAccept = #{message := neighbor_accept, sender := Sender, ref := Ref}, State) ->
+  timer:cancel(Ref),
+  {_, State1} = try_add_node_to_active_view(Sender, State),
+  push_state(State1),
+  State1.
 
-maybe_gossip_for_neighbor(State) ->
+-spec(handle_neighbor_deny(neighbor_deny(), state()) -> state()).
+handle_neighbor_deny(NeighborDeny = #{message := neighbor_deny, sender := Sender, ref := Ref}, State) ->
+  timer:cancel(Ref),
+  ActiveView = State#state.active_view,
+  PassiveView = State#state.passive_view,
+  lager:debug("Denied from joining ~p, while active view ~p, passive view: ~p", [Sender, ActiveView, PassiveView]),
+  schedule_disconnect(Sender),
+  State1 = neighbor_deny_combine_passive_view(NeighborDeny, State),
+  push_state(State1),
+  State1.
+
+neighbor_deny_combine_passive_view(#{passive_view := RemotePassiveView}, State) ->
+  PassiveView = State#state.passive_view,
+  ActiveView = State#state.active_view,
+  LargeCombinedView = ordsets:union(RemotePassiveView, PassiveView),
+  LargeCombinedView1 = ordsets:subtract(LargeCombinedView, ActiveView),
+  LargeCombinedView2 = ordsets:del_element(node(), LargeCombinedView1),
+  {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, ?PASSIVE_VIEW_SIZE),
+  State#state{passive_view = NewPassiveView};
+neighbor_deny_combine_passive_view(_, State) ->
   State.
 
-wrap_gossip_message(Message = #{message := MessageType}, State) ->
-  Metadata = new_metadata(MessageType, State),
-  #{message => gossip, path => [], payload => Message, metadata => Metadata}.
+%% This is triggered by lashup_gm_probe to handle a permanently sectioned graph
+%% We give it a one minute timeout, because there's no point in making it a small number.
+%% We don't want to make it too high
+-spec(handle_recommend_neighbor(Node :: node(), State :: state()) -> ok).
+handle_recommend_neighbor(Node, _State) ->
+  send_neighbor_to(60000, Node, high),
+  ok.
+
+%%%%%%%%%% End Neighbor management
 
 
-do_randomized_gossip(_GossipMessage = #{path := Path}, _ActiveView) when length(Path) > 10 ->
-  %% Drop the message after it's seen 10 nodes
-  ok;
-do_randomized_gossip(GossipMessage = #{path := Path}, ActiveView) ->
-  NewPath = [node()|Path],
-  GossipMessage1 = GossipMessage#{path := NewPath},
-  Candidates = ActiveView -- NewPath,
-  case Candidates of
-    [] ->
-      %% Drop message
-      ok;
-    Candidates1 ->
-      %% TODO:
-      %% Determine if we should narrow the gossip at all
-      %% The code for doing that is below:begin
-      % Candidates2 = shuffle_list(Candidates1, seed()),
-      % {RealCandidates, _} = lists:split(2, Candidates2),
-      lists:foreach(fun(Candidate) -> gossip_to(Candidate, GossipMessage1) end, Candidates1)
-  end.
-gossip_to(Candidate, GossipMessage = #{path := Path}) ->
-  case lists:member(Candidate, Path) of
-    true ->
-      ok;
-    false ->
-      gen_server:cast({?SERVER, Candidate}, GossipMessage)
-  end.
-handle_gossip_message(GossipMessage = #{payload := Payload, metadata := Metadata}, State = #state{active_view = ActiveView, messages = Messages}) ->
-  case seen_message(Metadata, Messages) of
-    true ->
-      Messages1 = recognize_message(Metadata, Messages),
-      State#state{messages = Messages1};
-    false ->
-      do_randomized_gossip(GossipMessage, ActiveView),
-      Messages1 = recognize_message(Metadata, Messages),
-      State1 = State#state{messages = Messages1},
-      State2 = handle_gossip_payload(Payload, State1),
-      State2
-  end.
 
-%% Gossip handlers -
-%% These will mostly be internal messages
-%% But we'll be able to send external gossip messages as well
-%
-handle_gossip_payload(#{message := unfilled_active_view}, State = #state{active_view = MyActiveView})
-    when length(MyActiveView) >= ?ACTIVE_VIEW_SIZE ->
-  State;
-
-handle_gossip_payload(#{message := unfilled_active_view, node := RemoteNode},
-  State) ->
-  send_neighbor_to(5000, RemoteNode, low),
+%% Check State function is mostly there during testing
+%% We should rip it out / disable it in prod
+-spec(check_state(state()) -> state()).
+check_state(State = #state{}) ->
+  ok = check_views(State),
+  ok = check_monitors(State),
   State.
 
-check_state(State = #state{passive_view = PassiveView, active_view = ActiveView, monitors = Monitors}) ->
-  case ordsets:intersection(PassiveView, ActiveView) of
-    [] ->
-      ok;
-    Else ->
-      error({overlapping, Else})
-  end,
-  case ordsets:is_element(node(), ActiveView) of
-    true ->
-      error(self_in_active_view);
-    _ -> ok
-  end,
-  case ordsets:is_element(node(), PassiveView) of
-    true ->
-      error(self_in_passive_view);
-    _ -> ok
-  end,
+-spec(check_monitors(state()) -> ok).
+check_monitors(#state{active_view = ActiveView, monitors = Monitors}) ->
   %% Ensure we have a monitor_ref for every node in ActiveView
   CheckFun1 =
     fun(Node) ->
@@ -794,10 +795,30 @@ check_state(State = #state{passive_view = PassiveView, active_view = ActiveView,
     true ->
       ok;
     false ->
-      error(mistmatched_monitors)
+      error(mismatched_monitors)
   end,
-  State.
+  ok.
 
+-spec(check_views(state()) -> ok).
+check_views(_State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
+  case ordsets:intersection(PassiveView, ActiveView) of
+    [] ->
+      ok;
+    Else ->
+      error({overlapping, Else})
+  end,
+  case ordsets:is_element(node(), ActiveView) of
+    true ->
+      error(self_in_active_view);
+    _ -> ok
+  end,
+  case ordsets:is_element(node(), PassiveView) of
+    true ->
+      error(self_in_passive_view);
+    _ -> ok
+  end,
+  ok.
+%% End check_state
 contact_nodes(_State = #state{extra_masters = ExtraMasters}) ->
   contact_nodes(ExtraMasters);
 contact_nodes(ExtraMasters) ->
@@ -807,16 +828,21 @@ contact_nodes(ExtraMasters) ->
 
 
 
+-spec(handle_shuffle(Shuffle :: shuffle(), state()) -> state()).
 handle_shuffle(Shuffle = #{ttl := 0}, State) ->
-  do_shuffle(Shuffle, State);
+  State1 = do_shuffle(Shuffle, State),
+  push_state(State1),
+  State1;
 handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = #state{active_view = ActiveView})
-    when Sender =/= node() andalso Node =/= node()->
+  when Sender =/= node() andalso Node =/= node() ->
   PotentialNodes = ordsets:del_element(Node, ActiveView),
   PotentialNodes1 = ordsets:del_element(Sender, PotentialNodes),
   case PotentialNodes1 of
     [] ->
       lager:warning("Handling shuffle early, because no nodes to send it to"),
-      do_shuffle(Shuffle, State);
+      State1 = do_shuffle(Shuffle, State),
+      push_state(State1),
+      State1;
     Else ->
       NewShuffle = Shuffle#{sender := node(), ttl := TTL - 1},
       NextNode = choose_node(Else),
@@ -824,7 +850,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
       State
   end.
 do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemotePassiveView, node := Node},
-    State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
+  State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
   ReplyNodes1 = ordsets:subtract(MyPassiveView, RemoteActiveView),
   ReplyNodes2 = ordsets:subtract(ReplyNodes1, RemotePassiveView),
   ShuffleReply = #{message => shuffle_reply, node => node(), combined_view => ReplyNodes2},
@@ -838,7 +864,6 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
   State#state{passive_view = CombinedView}.
 
 
-
 %% It returns how long to wait until to shuffle again
 try_shuffle(_State = #state{active_view = []}) ->
   lager:warning("Could not shuffle because active view empty"),
@@ -847,7 +872,14 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
   %% TODO:
   %% -Make TTL Configurable
   %% -Allow for limiting view sizes further
-  Shuffle = #{message => shuffle, sender => node(), node => node(), active_view => ActiveView, passive_view => PassiveView, ttl => 5},
+  Shuffle = #{
+    message => shuffle,
+    sender => node(),
+    node => node(),
+    active_view => ActiveView,
+    passive_view => PassiveView,
+    ttl => 5
+  },
   Node = choose_node(ActiveView),
   gen_server:cast({?SERVER, Node}, Shuffle),
   case length(PassiveView) of
@@ -857,13 +889,16 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
       60000
   end.
 
-
-handle_shuffle_reply(_ShuffleReply = #{combined_view := CombinedView}, State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
+-spec(handle_shuffle_reply(shuffle_reply(), state()) -> state()).
+handle_shuffle_reply(_ShuffleReply = #{combined_view := CombinedView},
+    State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
   LargeCombinedView = ordsets:union(CombinedView, MyPassiveView),
   LargeCombinedView1 = ordsets:subtract(LargeCombinedView, MyActiveView),
   LargeCombinedView2 = ordsets:del_element(node(), LargeCombinedView1),
   {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, ?PASSIVE_VIEW_SIZE),
-  State#state{passive_view = NewPassiveView}.
+  State1 = State#state{passive_view = NewPassiveView},
+  push_state(State1),
+  State1.
 
 ensure_monitor(Node, Monitors) ->
   case has_monitor(Node, Monitors) of
@@ -909,53 +944,25 @@ has_monitor(Node, Monitors) ->
 
 shuffle_list(List, FixedSeed) ->
   {_, PrefixedList} =
-  lists:foldl(fun(X, {SeedState, Acc}) ->
-    {N, SeedState1} = random:uniform_s(1000000, SeedState),
-    {SeedState1, [{N, X}|Acc]}
-    end,
-    {FixedSeed, []},
-    List),
+    lists:foldl(fun(X, {SeedState, Acc}) ->
+      {N, SeedState1} = random:uniform_s(1000000, SeedState),
+      {SeedState1, [{N, X} | Acc]}
+                end,
+      {FixedSeed, []},
+      List),
   PrefixedListSorted = lists:sort(PrefixedList),
   [Value || {_N, Value} <- PrefixedListSorted].
 
 
+-spec(push_state(state()) -> ok).
 push_state(#state{passive_view = PV, active_view = AV}) ->
-  gen_event:sync_notify(lashup_hyparview_events, #{type => view_update, active_view => AV, passive_view => PV}).
+  gen_event:sync_notify(lashup_hyparview_events, #{type => view_update, active_view => AV, passive_view => PV}),
+  ok.
 
 seed() ->
   {erlang:phash2([node()]),
     erlang:monotonic_time(),
     erlang:unique_integer()}.
-
-new_metadata(MessageType, _State = #state{init_time = InitTime}) ->
-  {{node(), InitTime, MessageType}, erlang:unique_integer([monotonic])}.
-
-%% Limit to 10000 messages
-recognize_message(Metadata, Messages) when length(Messages) > 10000 ->
-  recognize_message(Metadata, lists:split(10000, Messages));
-
-recognize_message(_Metadata = {Key = {_Node, _InitTime, _MessageType}, Counter}, Messages) ->
-  case lists:keyfind(Key, 1, Messages) of
-    false ->
-      [{Key, Counter}|Messages];
-    Tuple = {_Key, OldCounter} when Counter > OldCounter ->
-      Messages1 = lists:delete(Tuple, Messages),
-      [{Key, Counter}|Messages1];
-    %% Move the tuple up, since we saw it again
-    Tuple ->
-      Messages1 = lists:delete(Tuple, Messages),
-      [Tuple|Messages1]
-  end.
-
-seen_message(_Metadata = {Key = {_Node, _InitTime, _MessageType}, Counter}, Messages) ->
-  case lists:keyfind(Key, 1, Messages) of
-    false ->
-      false;
-    _Tuple = {_Key, OldCounter} when Counter > OldCounter ->
-      false;
-    _Tuple ->
-      true
-  end.
 
 shuffle_backoff_loop(Delay, Pid) ->
   timer:sleep(Delay),
@@ -966,14 +973,11 @@ shuffle_backoff_loop(Delay, Pid) ->
       shuffle_backoff_loop(Delay, Pid)
   end.
 
-handle_do_probe(Node, State = #state{active_view = ActiveViews, pings_in_flight = PIF}) ->
+handle_do_probe(Node, State = #state{active_view = ActiveViews}) ->
   case lists:member(Node, ActiveViews) of
     true ->
-      Now = erlang:monotonic_time(),
-      {ok, TimerRef} = timer:send_after(100, {ping_failed, Node}),
-      gen_server:cast({?SERVER, Node}, #{message => ping, from => self(), now => Now, ref => TimerRef}),
-      PIF2 = orddict:store(TimerRef, Node, PIF),
-      State#state{pings_in_flight = PIF2};
+      lashup_hyparview_ping_handler:ping(Node),
+      State;
     false ->
       State
   end.
@@ -981,37 +985,49 @@ handle_do_probe(Node, State = #state{active_view = ActiveViews, pings_in_flight 
 handle_ping_rq(State = #state{active_view = ActiveViews}) when ActiveViews == [] ->
   reschedule_ping(),
   State;
-handle_ping_rq(State = #state{active_view = ActiveViews, ping_idx = PingIdx, pings_in_flight = PIF}) ->
+
+handle_ping_rq(State = #state{active_view = ActiveViews, ping_idx = PingIdx}) ->
   reschedule_ping(),
   Idx = PingIdx rem length(ActiveViews) + 1,
   Node = lists:nth(Idx, ActiveViews),
-  Now = erlang:monotonic_time(),
-  {ok, TimerRef} = timer:send_after(100, {ping_failed, Node}),
-  gen_server:cast({?SERVER, Node}, #{message => ping, from => self(), now => Now, ref => TimerRef}),
-  PIF2 = orddict:store(TimerRef, Node, PIF),
-  State#state{pings_in_flight = PIF2, ping_idx = PingIdx + 1}.
-
-
-handle_ping(PingMessage = #{from := From}, _State) ->
-  PongMessage = PingMessage#{message => pong},
-  gen_server:cast(From, PongMessage).
-
-%% TODO: Keep track of RTTs somewhere
-handle_pong(_PongMessage = #{ref := Ref}, State = #state{pings_in_flight = PIF}) ->
-  timer:cancel(Ref),
-  PIF2 = orddict:erase(Ref, PIF),
-  State#state{pings_in_flight = PIF2}.
+  lashup_hyparview_ping_handler:ping(Node),
+  State#state{ping_idx = PingIdx + 1}.
 
 %% TODO: Determine whether we should disconnect_node
 %% Or do something more 'clever'
+-spec(handle_ping_failed(node(), state()) -> state()).
 handle_ping_failed(Node, State) ->
-  lager:info("Ping failed for node: ~p", [Node]),
-  erlang:disconnect_node(Node),
-  State.
-
+  disconnect_node(Node, State).
 
 schedule_disconnect(Node) ->
-  timer:send_after(25000, {maybe_disconnect, Node}).
+  schedule_disconnect(Node, 25000).
+schedule_disconnect(Node, Time) ->
+  RandFloat = random:uniform(),
+  Multipler = 1 + round(RandFloat),
+  Delay = Multipler * Time,
+  timer:send_after(Delay, {maybe_disconnect, Node}).
+
+-spec(disconnect_node(node(), state()) -> state()).
+disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveView, passive_view = PassiveView}) ->
+  case lists:member(Node, ActiveView) of
+    true ->
+      Monitors1 = remove_monitor(Node, Monitors),
+      DisconnectMessage = #{message => disconnect, sender => node()},
+      case lists:member(Node, nodes()) of
+        true ->
+          gen_server:cast({?SERVER, Node}, DisconnectMessage);
+        false ->
+          ok
+      end,
+      PassiveView1 = ordsets:add_element(Node, PassiveView),
+      ActiveView1 = ordsets:del_element(Node, ActiveView),
+      schedule_disconnect(Node),
+      State#state{active_view = ActiveView1, passive_view = PassiveView1, monitors = Monitors1};
+    false ->
+      State
+  end.
+
+
 
 handle_maybe_disconnect(Node, State = #state{active_view = ActiveView}) ->
   case {lists:member(Node, nodes()), lists:member(Node, ActiveView)} of
@@ -1037,10 +1053,27 @@ really_poll_for_master_nodes() ->
       ok
   end.
 
+handle_recognize_pong(_Pong = #{now := _Now, receiving_node := Node},
+  _State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
+  case {lists:member(Node, ActiveView), lists:member(Node, PassiveView)} of
+    {true, false} ->
+      %% TODO:
+      %% Record successful roundtrip metric
+      ok;
+    {false, true} ->
+      %% Something kinda weird has happened
+      %% This can reasonably happen from late pongs
+      %% TODO: Record it
+      lager:info("Late Pong from Node: ~p, already moved to passive view", [Node]);
+    {false, false} ->
+      %% This is bad
+      lager:warning("Pong from unknown node: ~p, not in active nor passive veiws", [Node])
+  end.
+  %% {true, true} should never happen. If it does, we _should_ crash.
 
 -ifdef(TEST).
 trim_test() ->
-  Ordset = ordsets:from_list([1,3,4,5]),
+  Ordset = ordsets:from_list([1, 3, 4, 5]),
   {Ordset1, _} = trim_ordset_to(Ordset, 3),
   ?assertEqual(3, length(Ordset1)).
 -endif.
