@@ -416,7 +416,6 @@ try_do_join(State) ->
 -spec(do_join(State :: state()) -> ok | {error, Reason :: term()}).
 do_join(State) ->
   ContactNodes = contact_nodes(State),
-  lager:debug("Contact nodes found during join: ~p", [ContactNodes]),
   case ContactNodes of
     [] ->
       {error, no_contact_nodes};

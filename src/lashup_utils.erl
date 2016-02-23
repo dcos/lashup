@@ -11,7 +11,7 @@
 
 %% API
 -export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
-  get_dcos_ip/0, erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2,
+  erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2,
   shuffle_list/1]).
 
 -record(window, {
@@ -88,14 +88,6 @@ compare_vclocks(V1, V2) ->
       concurrent
   end.
 
--spec(get_dcos_ip() -> false | inet:ip4_address()).
-get_dcos_ip() ->
-  case inet:parse_ipv4_address(os:cmd("/opt/mesosphere/bin/detect_ip")) of
-    {ok, IP} ->
-      IP;
-    {error, einval} ->
-      false
-  end.
 
 -spec(maybe_poll_for_master_nodes() -> [node()]).
 maybe_poll_for_master_nodes() ->
