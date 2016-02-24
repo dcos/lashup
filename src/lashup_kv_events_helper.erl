@@ -94,10 +94,10 @@ dump_events(State = #state{match_spec = MatchSpec}) ->
 dump_events(Records, State) ->
   [do_send(Record, State) || Record <- Records].
 
-do_send(#kv{key = Key, map = Map, vclock = VClock}, #state{pid = Pid, ref = Reference}) ->
+do_send(#kv{key = Key, map = Map, vclock = VClock}, State) ->
   Value = riak_dt_map:value(Map),
-  Event = #{type => ingest_new, key => Key, map => Map, vclock => VClock, value => Value, ref => Reference},
-  Pid ! Event.
+  Payload = #{type => ingest_new, key => Key, map => Map, vclock => VClock, value => Value, ref => undefined},
+  send_event({lashup_kv_events, Payload}, State).
 
 rewrite_matchspec(MatchSpec) ->
   [{rewrite_head(MatchHead), MatchConditions, ['$_']} || {{MatchHead}, MatchConditions, [true]} <- MatchSpec].
