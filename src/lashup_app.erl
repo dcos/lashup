@@ -10,8 +10,7 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
-  lashup_nervecenter:start_link(),
   lashup_sup:start_link().
 
 stop(_State) ->
-  lashup_nervecenter:stop().
+  ok.
