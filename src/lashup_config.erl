@@ -18,7 +18,8 @@
   full_probe_period/0,
   min_departition_probe_interval/0,
   max_mc_replication/0,
-  aae_interval/0
+  aae_interval/0,
+  work_dir/0
 ]).
 
 %% @doc
@@ -86,5 +87,10 @@ max_mc_replication() ->
 aae_interval() ->
   application:get_env(lashup, aae_interval, 300000).
 
-
-
+%% @doc
+%% Lashup working directory
+work_dir() ->
+  %% This is /var/lib/dcos/lashup on DCOS
+  WorkDir = application:get_env(lashup, work_dir, "."),
+  NodeNameStr = atom_to_list(node()),
+  filename:join(WorkDir, NodeNameStr).

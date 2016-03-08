@@ -44,11 +44,10 @@
 -record(subscription, {node, pid, monitor_ref}).
 -record(state, {
   subscriptions = [],
-  init_time,
-  vclock_id,
-  seed,
+  epoch = erlang:error() :: non_neg_integer(),
   active_view = [],
-  subscribers = []}).
+  subscribers = []
+}).
 
 -type state() :: #state{}.
 
@@ -83,15 +82,10 @@ get_subscriptions() ->
   gen_server:call(?SERVER, get_subscriptions).
 
 id() ->
-  id(node()).
+  node().
 
 id(Node) ->
-  case lookup_node(Node) of
-    error ->
-      error;
-    {ok, Member} ->
-      maps:get(server_id, Member#member.dvvset_value)
-  end.
+  Node.
 
 
 %%--------------------------------------------------------------------
@@ -132,13 +126,8 @@ init([]) ->
   ets:new(members, [ordered_set, named_table, {keypos, #member.node}, compressed]),
   lashup_hyparview_events:subscribe(
     fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
-  VClockID = {node(), erlang:phash2(random:uniform())},
-  State = #state{
-    init_time = erlang:monotonic_time(),
-    vclock_id = VClockID,
-    seed = lashup_utils:seed()
-  },
-  init_dvvset(State),
+  State = #state{epoch = new_epoch()},
+  init_node(State),
   timer:send_interval(3600 * 1000, trim_nodes),
   {ok, State}.
 
@@ -170,8 +159,6 @@ handle_call(update_node, _From, State) ->
 handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
   {reply, Reply, State};
-handle_call(seed, _From, State = #state{seed = Seed}) ->
-  {reply, Seed, State};
 handle_call(Request, _From, State) ->
   lager:debug("Received unknown request: ~p", [Request]),
   {reply, ok, State}.
@@ -275,9 +262,28 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-handle_sync(Pid, State) ->
-  lashup_gm_sync_worker:handle(Pid, State#state.seed).
+handle_sync(Pid, _State) ->
+  lashup_gm_sync_worker:handle(Pid).
 
+%% @private Generates new epoch
+-spec(new_epoch() -> non_neg_integer()).
+new_epoch() ->
+  WorkDir = lashup_config:work_dir(),
+  EpochFilename = filename:join(WorkDir, "lashup_gm_epoch"),
+  case lashup_save:read(EpochFilename) of
+    not_found ->
+      Epoch = erlang:system_time(seconds),
+      Data = #{epoch => Epoch},
+      ok = lashup_save:write(EpochFilename, term_to_binary(Data)),
+      Epoch;
+    {ok, BinaryData} ->
+      OldData = #{epoch := OldEpoch} = binary_to_term(BinaryData),
+      %% Should we check if our time is (Too far) behind the last epoch?
+      NewEpoch = max(erlang:system_time(seconds), OldEpoch) + 1,
+      NewData = OldData#{epoch := NewEpoch},
+      ok = lashup_save:write(EpochFilename, term_to_binary(NewData)),
+      NewEpoch
+  end.
 
 -spec(handle_subscribe(Pid :: pid(), State :: state()) -> {{ok, Self :: pid()}, State1 :: state()}).
 handle_subscribe(Pid, State = #state{subscribers = Subscribers}) ->
@@ -316,54 +322,46 @@ check_member(Node, Subscriptions) ->
       Subscriptions
   end.
 
-%% @private Creates a new value for the DVVSet representing node metadata
-new_value(NodeClock, _State = #state{active_view = ActiveView, vclock_id = VClockID}) ->
+%% @private Creates a new value the node
+new_value(_State = #state{active_view = ActiveView, epoch = Epoch}) ->
   #{
     active_view => ActiveView,
-    server_id => VClockID,
-    node_clock => NodeClock
+    server_id => node(),
+    epoch => Epoch,
+    %% Positive looks nicer...
+    clock => erlang:unique_integer([positive, monotonic])
   }.
 
-new_dvvset(NodeClock, State) ->
-  dvvset:new(new_value(NodeClock, State)).
-
-update_dvvset(NodeClock, OldDVVSet, State) ->
-  DVVSet = dvvset:new(dvvset:join(OldDVVSet), new_value(NodeClock, State)),
-  dvvset:update(DVVSet, OldDVVSet, State#state.vclock_id).
 
 %% @private Creates the first Member record representing the local node
-init_dvvset(State = #state{vclock_id = VClockID}) ->
-  LocalUpdate = NodeClock = erlang:system_time(nano_seconds),
-  DVVSet = dvvset:update(new_dvvset(NodeClock, State), VClockID),
+init_node(State) ->
+  LocalUpdate = erlang:system_time(nano_seconds),
+  Value = new_value(State),
   ClockDelta = 0,
-  DVVSetValue = lww(DVVSet),
   Member = #member{
     node = node(),
-    dvvset = DVVSet,
     locally_updated_at = [LocalUpdate],
     clock_deltas = [ClockDelta],
-    dvvset_value = DVVSetValue,
-    active_view = maps:get(active_view, DVVSetValue)
+    value = Value,
+    active_view = maps:get(active_view, Value)
   },
   persist(Member, State).
 
 
 %% @private Update the local node's DVVSet
 update_node(State) ->
-  [Member] = ets:lookup(members, node()),
-  NodeClock = erlang:system_time(nano_seconds),
-  MergedDVVSet = update_dvvset(NodeClock, Member#member.dvvset, State),
-  update_node(MergedDVVSet, State).
+  NewValue = new_value(State),
+  update_node(NewValue, State).
 
-%% @private Take an updated DVVSet from the local node, turn it into a message and propagate it
-update_node(NewDVVSet, State) ->
+%% @private Take an updated Value from the local node, turn it into a message and propagate it
+update_node(NewValue, State) ->
   %% TODO:
   %% Adjust TTL based on maximum path length from link-state database
   Message = #{
     message => updated_node,
     node => node(),
     ttl => 10,
-    dvvset => NewDVVSet
+    value => NewValue
   },
   handle_updated_node(node(), Message, State).
 
@@ -385,19 +383,15 @@ store_and_forward_new_updated_node(From,
   UpdatedNode = #{
     node := Node,
     ttl := TTL,
-    dvvset := DVVSet
+    value := Value
   }, State) ->
   LocalUpdate = erlang:monotonic_time(nano_seconds),
-  DVVSetValue = lww(DVVSet),
-  NodeClock = maps:get(node_clock, DVVSetValue),
-  ClockDelta = abs(NodeClock - LocalUpdate),
+
   Member = #member{
     node = Node,
     locally_updated_at = [LocalUpdate],
-    clock_deltas = [ClockDelta],
-    dvvset = DVVSet,
-    dvvset_value = DVVSetValue,
-    active_view = maps:get(active_view, DVVSetValue)
+    value = Value,
+    active_view = maps:get(active_view, Value)
   },
   persist(Member, State),
   NewUpdatedNode = UpdatedNode#{exempt_nodes => [From], ttl => TTL - 1},
@@ -405,22 +399,16 @@ store_and_forward_new_updated_node(From,
   State.
 
 
-maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{dvvset := DVVSet}, State) ->
+maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{value := RemoteValue}, State) ->
   %% Should be true, if the remote one is newer
-  RemoteVector = dvvset:join(DVVSet),
-  LocalVector = dvvset:join(Member#member.dvvset),
-  case {dvvset:descends(RemoteVector, LocalVector), dvvset:descends(LocalVector, RemoteVector)} of
-    %% The two are equal
-    {true, true} ->
-      ok;
-    %% Our local vector is newer
-    {false, true} ->
-      ok;
-    {true, false} ->
+  #{epoch := RemoteEpoch, clock := RemoteClock} = RemoteValue,
+  #{epoch := LocalEpoch, clock := LocalClock} = Member#member.value,
+  case {RemoteEpoch, RemoteClock} > {LocalEpoch, LocalClock}  of
+    true ->
       store_and_forward_updated_node(Member, From, UpdatedNode, State);
-    %% We've experienced a concurrency event
-    {false, false} ->
-      merge_and_forward_updated_node(Member, From, UpdatedNode, State)
+    %% We've seen an old clock
+    false ->
+      ok
   end,
   State.
 
@@ -429,50 +417,24 @@ store_and_forward_updated_node(Member, From, _UpdatedNode, _State)
   ok;
 store_and_forward_updated_node(Member, From,
   UpdatedNode = #{
-    dvvset := DVVSet
+    value := Value
   }, State)  ->
-  OldDVVSet = Member#member.dvvset,
-  NewDVVSet = dvvset:sync([DVVSet, OldDVVSet]),
-  update_local_member(NewDVVSet, Member, State),
+  update_local_member(Value, Member, State),
   NewUpdatedNode = UpdatedNode#{exempt_nodes => [From]},
   forward(NewUpdatedNode, State);
 store_and_forward_updated_node(_Member, _From, _UpdatedNode, _State) ->
   ok.
 
-%% Recirculate the update, infusing it with more information, and updating the clock
-merge_and_forward_updated_node(Member, _From, _UpdatedNode = #{dvvset := DVVSet, node := Node}, State)
-    when Node == node()->
-  lager:debug("Received greater clock about self from network: ~p, local: ~p", [DVVSet, Member#member.dvvset]),
-  %% Sync the remote DVVSet and our local one
-  NewDVVSet = dvvset:sync([DVVSet, Member#member.dvvset]),
-  Timestamp = erlang:system_time(nano_seconds),
-  MergedDVVSet = update_dvvset(Timestamp, NewDVVSet, State),
-  update_node(MergedDVVSet, State);
-%% Sync the two values, but do not alter them
-merge_and_forward_updated_node(Member, From, UpdatedNode = #{dvvset := DVVSet}, State) ->
-  NewDVVSet = dvvset:sync([DVVSet, Member#member.dvvset]),
-  NewUpdatedNode = UpdatedNode#{
-    dvvset => NewDVVSet,
-    exempt_nodes => [From]
-  },
-  update_local_member(NewDVVSet, Member, State),
-  forward(NewUpdatedNode, State).
 
-%% @doc update a local member, and persist it to ets, from a DVVSet
-%% The DVVSet has to already be merged from the one we got off the network
-update_local_member(DVVSet, Member, State) ->
+%% @doc update a local member, and persist it to ets, from a Value
+%% The value is gauranteed to be bigger than the one we have now
+update_local_member(Value, Member, State) ->
   Now = erlang:monotonic_time(nano_seconds),
-  NewDVVSetValue = lww(DVVSet),
-  NodeClock = maps:get(node_clock, NewDVVSetValue),
   NewLocallyUpdatedAt = lists:sublist([Now | Member#member.locally_updated_at], 100),
-  ClockDelta = abs(NodeClock - Now),
-  NewClockDelta = lists:sublist([ClockDelta | Member#member.clock_deltas], 100),
   NewMember = Member#member{
     locally_updated_at = NewLocallyUpdatedAt,
-    clock_deltas = NewClockDelta,
-    dvvset = DVVSet,
-    dvvset_value = NewDVVSetValue,
-    active_view = maps:get(active_view, NewDVVSetValue)
+    value = Value,
+    active_view = maps:get(active_view, Value)
   },
   process_new_member(Member, NewMember, State),
   persist(NewMember, State).
@@ -593,14 +555,3 @@ persist(Member, _State) ->
   end,
   %% Find the component I'm part of
   ok.
-
-lww_value(_Value1 = #{node_clock := NodeClock1}, _Value2 = #{node_clock := NodeClock2}) ->
-  NodeClock1 =< NodeClock2.
-
-
-%% Add reconilation code
-lww(DVVSet) ->
-  LWW = dvvset:lww(fun lww_value/2, DVVSet),
-  [Value] = dvvset:values(LWW),
-  Value.
-

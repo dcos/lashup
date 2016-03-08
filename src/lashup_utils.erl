@@ -9,10 +9,12 @@
 -module(lashup_utils).
 -author("sdhillon").
 
+-include_lib("kernel/include/file.hrl").
+
 %% API
 -export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
-  erlang_nodes/1, maybe_poll_for_master_nodes/0, nodekey/2, subtract/2,
-  shuffle_list/1]).
+  erlang_nodes/1, maybe_poll_for_master_nodes/0, subtract/2,
+  shuffle_list/1, replace_file/2, read_file/1]).
 
 -record(window, {
   samples = [] :: list(integer()),
@@ -159,10 +161,6 @@ wait_for_name(Socket, Acc) ->
       Acc
   end.
 
--spec(nodekey(Node :: node(), Seed :: term()) -> {integer(), Node :: node()}).
-nodekey(Node, Seed) ->
-  Hash = erlang:phash2({Node, Seed}),
-  {Hash, Node}.
 
 -spec(subtract(List1, List2) -> Set when
   List1 :: [Type, ...],
@@ -183,6 +181,54 @@ subtract(List1, List2) ->
   ordsets:subtract(List1Set, List2Set).
 
 
+
+%% Borrowed from: https://github.com/basho/riak_ensemble/blob/develop/src/riak_ensemble_util.erl
+-spec replace_file(file:filename(), iodata()) -> ok | {error, term()}.
+replace_file(FN, Data) ->
+  TmpFN = FN ++ ".tmp",
+  {ok, FH} = file:open(TmpFN, [write, raw]),
+  try
+    ok = file:write(FH, Data),
+    ok = file:sync(FH),
+    ok = file:close(FH),
+    ok = file:rename(TmpFN, FN),
+    {ok, Contents} = read_file(FN),
+    true = (Contents == iolist_to_binary(Data)),
+    ok
+  catch _:Err ->
+    {error, Err}
+  end.
+
+
+%%===================================================================
+
+%% @doc Similar to {@link file:read_file/1} but uses raw file I/O
+-spec read_file(file:filename()) -> {ok, binary()} | {error, _}.
+read_file(FName) ->
+  case file:open(FName, [read, raw, binary]) of
+    {ok, FD} ->
+      Result = read_file(FD, []),
+      ok = file:close(FD),
+      case Result of
+        {ok, IOList} ->
+          {ok, iolist_to_binary(IOList)};
+        {error, _} = Err ->
+          Err
+      end;
+    {error, _} = Err ->
+      Err
+  end.
+
+-spec read_file(file:fd(), [binary()]) -> {ok, [binary()]} | {error, _}.
+read_file(FD, Acc) ->
+  case file:read(FD, 4096) of
+    {ok, Data} ->
+      read_file(FD, [Data | Acc]);
+    eof ->
+      {ok, lists:reverse(Acc)};
+    {error, _} = Err ->
+      Err
+  end.
 
 
 
