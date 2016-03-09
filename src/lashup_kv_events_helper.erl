@@ -17,7 +17,6 @@
   match_spec_comp :: ets:comp_match_spec(),
   pid :: pid(),
   ref :: reference(),
-  event_ref :: reference(),
   vclocks = orddict:new() :: orddict:orddict()
 }).
 
@@ -32,45 +31,48 @@ start_link(MatchSpec) ->
   {ok, Ref}.
 
 init(State) ->
-  {ok, EventRef} = lashup_kv_events:subscribe(),
-  State1 = State#state{event_ref = EventRef},
-  State2 = dump_events(State1),
-  loop(State2).
+  ok = mnesia:wait_for_tables([kv], 5000),
+  mnesia:subscribe({table, kv, detailed}),
+  State1 = dump_events(State),
+  loop(State1).
 
-loop(State = #state{event_ref = EventRef}) ->
+loop(State) ->
   receive
-    Event = {lashup_kv_events, #{ref := EventRef}} ->
-      State1 = maybe_process_event(Event, State),
-      loop(State1)
+    {mnesia_table_event, {write, _Table = kv, NewRecord, OldRecords, _ActivityId}} ->
+      State1 = maybe_process_event(NewRecord, OldRecords, State),
+      loop(State1);
+    Any ->
+      lager:warning("Got something unexpected: ~p", [Any]),
+      loop(State)
   end.
 
 
 %   Event = #{key => Key, map => Map, vclock => VClock, value => Value, ref => Reference},
 
-maybe_process_event(Event = {_, #{key := Key}}, State = #state{match_spec_comp = MatchSpec}) ->
+maybe_process_event(NewRecord = #kv{key = Key}, OldRecords, State = #state{match_spec_comp = MatchSpec}) ->
   case ets:match_spec_run([{Key}], MatchSpec) of
     [true] ->
-      maybe_process_event2(Key, Event, State);
+      maybe_process_event2(NewRecord, OldRecords, State);
     [] ->
       State
   end.
 
-maybe_process_event2(Key, Event, State = #state{vclocks = VClocks}) ->
+maybe_process_event2(NewRecord = #kv{key = Key}, OldRecords, State = #state{vclocks = VClocks}) ->
   case orddict:find(Key, VClocks) of
     error ->
-      send_event(Event, State),
-      {_, #{vclock := ForeignVClock}} = Event,
+      send_event(NewRecord, OldRecords, State),
+      #kv{vclock = ForeignVClock} = NewRecord,
       update_state(Key, ForeignVClock, State);
     {ok, VClock} ->
-      maybe_process_event3(Event, Key, VClock, State)
+      maybe_process_event3(NewRecord, OldRecords, VClock, State)
   end.
 
-maybe_process_event3(Event = {_, #{vclock := ForeignVClock}}, Key, LocalVClock, State) ->
-  case vclock:dominates(ForeignVClock, LocalVClock) of
+maybe_process_event3(NewRecord = #kv{vclock = ForeignVClock, key = Key}, OldRecords, LocalVClock, State) ->
+  case riak_dt_vclock:dominates(ForeignVClock, LocalVClock) of
     false ->
       State;
     true ->
-      send_event(Event, State),
+      send_event(NewRecord, OldRecords, State),
       update_state(Key, ForeignVClock, State)
   end.
 
@@ -79,25 +81,28 @@ update_state(Key, VClock, State = #state{vclocks = VClocks}) ->
   State#state{vclocks = VClocks1}.
 
 %% Rewrite the ref and send the event
-send_event({lashup_kv_events, Payload}, #state{ref = Ref, pid = Pid}) ->
-  Payload1 = Payload#{ref := Ref},
-  Pid ! {lashup_kv_events, Payload1}.
-
+send_event(_NewRecord = #kv{key = Key, map = Map}, [], #state{ref = Ref, pid = Pid}) ->
+  Value = riak_dt_map:value(Map),
+  Event = #{type => ingest_new, key => Key, ref => Ref, value => Value},
+  Pid ! {lashup_kv_events, Event};
+send_event(_NewRecord = #kv{key = Key, map = Map} = _NewRecords,
+  [#kv{map = OldMap}] = _OldRecords, #state{ref = Ref, pid = Pid}) ->
+  OldValue = riak_dt_map:value(OldMap),
+  Value = riak_dt_map:value(Map),
+  Event = #{type => ingest_update, key => Key, ref => Ref, value => Value, old_value => OldValue},
+  Pid ! {lashup_kv_events, Event}.
 
 dump_events(State = #state{match_spec = MatchSpec}) ->
   RewrittenMatchspec = rewrite_matchspec(MatchSpec),
-  Records = ets:select(lashup_kv, RewrittenMatchspec),
+  Records = mnesia:dirty_select(kv, RewrittenMatchspec),
+
   dump_events(Records, State),
   VClocks = ordsets:from_list([{Key, VClock} || #kv{key = Key, vclock = VClock} <- Records]),
   State#state{vclocks = VClocks}.
 
 dump_events(Records, State) ->
-  [do_send(Record, State) || Record <- Records].
+  [send_event(Record, [], State) || Record <- Records].
 
-do_send(#kv{key = Key, map = Map, vclock = VClock}, State) ->
-  Value = riak_dt_map:value(Map),
-  Payload = #{type => ingest_new, key => Key, map => Map, vclock => VClock, value => Value, ref => undefined},
-  send_event({lashup_kv_events, Payload}, State).
 
 rewrite_matchspec(MatchSpec) ->
   [{rewrite_head(MatchHead), MatchConditions, ['$_']} || {{MatchHead}, MatchConditions, [true]} <- MatchSpec].

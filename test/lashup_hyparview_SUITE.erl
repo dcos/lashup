@@ -30,6 +30,7 @@ init_per_suite(Config) ->
   Config.
 
 end_per_suite(Config) ->
+  net_kernel:stop(),
   Config.
 
 all() ->
