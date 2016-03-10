@@ -559,10 +559,10 @@ divergent_keys(LocalAAEData, RemoteAAEData) ->
     {RemoteKey, RemoteClock} <- RemoteAAEData,
     LocalKey == RemoteKey,
     LocalClock =/= RemoteClock
-      andalso (not vclock:equal(LocalClock, RemoteClock))
+      andalso (not riak_dt_vclock:equal(LocalClock, RemoteClock))
       andalso (
-        vclock:descends(LocalClock, RemoteClock) orelse
-        not vclock:descends(RemoteClock, LocalClock)
+        riak_dt_vclock:descends(LocalClock, RemoteClock) orelse
+        not riak_dt_vclock:descends(RemoteClock, LocalClock)
       )
     ].
 
