@@ -44,10 +44,8 @@
 -define(REJECT_OBJECT_SIZE_KB, 100).
 
 
--type actor_id() :: {Node :: node(), Uid :: integer()}.
 -record(state, {
   mc_ref = erlang:error() :: reference(),
-  actor_id = erlang:error() :: actor_id(),
   metadata_snapshot_current = [] :: metadata_snapshot(),
   metadata_snapshot_next = [] :: metadata_snapshot(),
   last_selected_key = '$end_of_table' :: '$end_of_table' | key()
@@ -108,6 +106,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  init_db(),
   rand:seed(exs1024),
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
@@ -125,10 +124,8 @@ init([]) ->
     ))),
 
   %% Maybe read_concurrency?
-  ?MODULE = ets:new(?MODULE, [ordered_set, named_table, {keypos, #kv.key}]),
   {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
-  ActorID = {node(), erlang:unique_integer()},
-  State = #state{mc_ref = Reference, actor_id = ActorID},
+  State = #state{mc_ref = Reference},
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -228,37 +225,73 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+%% Mostly borrowed from: https://github.com/ChicagoBoss/ChicagoBoss/wiki/Automatic-schema-initialization-for-mnesia
+-spec(init_db() -> ok).
+init_db() ->
+  init_db([node()]).
+
+-spec(init_db([node()]) -> ok).
+init_db(Nodes) ->
+  mnesia:create_schema(Nodes),
+  mnesia:change_table_copy_type (schema, node(), disc_copies), % If the node was already running
+  {ok, _} = application:ensure_all_started(mnesia),
+  ExistingTables = mnesia:system_info(tables),
+  Tables = [kv],
+  TablesToCreate = Tables -- ExistingTables,
+  lists:foreach(fun create_table/1, TablesToCreate),
+  ok = mnesia:wait_for_tables(Tables, 5000).
+
+create_table(kv) ->
+  {atomic, ok} =  mnesia:create_table(kv, [
+    {attributes, record_info(fields, kv)},
+    {disc_copies, [node()]},
+    {type, ordered_set}
+  ]).
+
+
+-spec(mk_write_fun(Key :: key(), Op :: riak_dt_map:map_op()) -> (fun())).
+mk_write_fun(Key, Op) ->
+  Node = node(),
+  fun() ->
+    NewKV =
+      case mnesia:read(kv, Key, write) of
+        [] ->
+          VClock = riak_dt_vclock:increment(Node, riak_dt_vclock:fresh()),
+          Counter = riak_dt_vclock:get_counter(Node, VClock),
+          Dot = {Node, Counter},
+          {ok, Map} = riak_dt_map:update(Op, Dot, riak_dt_map:new()),
+          #kv{key = Key, vclock = VClock, map = Map};
+        [ExistingKV = #kv{vclock = VClock, map = Map}] ->
+          VClock1 = riak_dt_vclock:increment(Node, VClock),
+          Counter = riak_dt_vclock:get_counter(Node, VClock1),
+          Dot = {Node, Counter},
+          {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
+          ExistingKV#kv{vclock = VClock1, map = Map1}
+      end,
+    case check_map(NewKV) of
+      {error, Error} ->
+        mnesia:abort(Error);
+      ok ->
+        mnesia:write(NewKV)
+    end,
+    NewKV
+  end.
+
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), State :: state()) -> {Reply :: term(), State1 :: state()}.
 handle_op(Key, Op, State) ->
-  {NewOrExisting, KV} = op_getkv(Key),
-  case modify_map(KV, Op, State) of
-    {ok, NewKV} ->
-      %% Do stuff
+  Fun = mk_write_fun(Key, Op),
+  case mnesia:sync_transaction(Fun) of
+    {atomic, #kv{} = NewKV} ->
+      ok = mnesia:sync_log(),
+      dumped = mnesia:dump_log(),
       propagate(NewKV),
-      persist(NewOrExisting, KV, NewKV),
       NewValue = riak_dt_map:value(NewKV#kv.map),
       {{ok, NewValue}, State};
-    Error = {error, _Reason} ->
-      {Error, State}
-      %% Don't do stuff
+    {aborted, Reason} ->
+      {{error, Reason}, State}
   end.
+  %% We really want to make sure this persists and we don't have backwards traveling clocks
 
-
--spec(modify_map(KV :: kv(), Op :: riak_dt_map:map_op(), State :: state()) ->
-{ok, KV1 :: kv(), Map :: riak_dt_map:dt_map()} | {error, Reason :: term()}).
-modify_map(KV = #kv{vclock = VClock, map = Map}, Op, _State = #state{actor_id = ActorID}) ->
-  Now = erlang:system_time(nano_seconds),
-  VClock1 = vclock:increment(ActorID, Now, VClock),
-  {ok, ImpureDot} = vclock:get_dot(ActorID, VClock1),
-  Dot = vclock:pure_dot(ImpureDot),
-  {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
-  KV1 = KV#kv{vclock = VClock1, map = Map1},
-  case check_map(KV1) of
-    ok ->
-      {ok, KV1};
-    Error = {error, _Reason} ->
-      Error
-  end.
 
 
 
@@ -287,22 +320,13 @@ propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
 % @private either gets the KV object for a given key, or returns an empty one
 -spec(op_getkv(key()) -> {new, kv()} | {existing, kv()}).
 op_getkv(Key) ->
-  case ets:lookup(?MODULE, Key) of
+  case mnesia:dirty_read(kv, Key) of
     [] ->
       {new, #kv{key = Key}};
     [KV] ->
       {existing, KV}
   end.
 
--spec(persist(new | existing, kv(), kv()) -> ok).
-persist(new, _OldKV, KV = #kv{key = Key, vclock = VClock, map = Map}) ->
-  true = ets:insert(?MODULE, KV),
-  lashup_kv_events:ingest(Key, Map, VClock),
-  ok;
-persist(existing, OldKV, KV = #kv{key = Key, vclock = VClock, map = Map}) ->
-  true = ets:insert(?MODULE, KV),
-  lashup_kv_events:ingest(Key, OldKV#kv.map, Map, VClock),
-  ok.
 
 
 -spec(handle_lashup_gm_mc_event(map(), state()) -> state()).
@@ -314,41 +338,49 @@ handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
 
--spec(handle_full_update(map(), state()) -> state()).
-handle_full_update(_Payload = #{key := Key, vclock := VClock, map := Map}, State) ->
-  {NewOrExisting, KV} = op_getkv(Key),
-  case get_maybe_write(KV, Map, VClock) of
-    {ok, NewKV} ->
-      persist(NewOrExisting, KV, NewKV);
-    false ->
-      ok
-  end,
-  State.
-
--spec(get_maybe_write(kv(), riak_dt_map:dt_map(), vclock:vclock()) -> false | {ok, kv()}).
-get_maybe_write(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
-  case {vclock:descends(RemoteVClock, LocalVClock), vclock:descends(LocalVClock, RemoteVClock)} of
+-spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
+  (fun())).
+mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
+  fun() ->
+    case mnesia:read(kv, Key, write) of
+      [] ->
+        mnesia:write(#kv{key = Key, vclock = RemoteVClock, map = RemoteMap});
+      [KV] ->
+        maybe_full_update(KV, RemoteMap, RemoteVClock)
+    end
+  end.
+-spec(maybe_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock())
+    -> {ok, kv()} | false).
+maybe_full_update(LocalKV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+  case {riak_dt_vclock:descends(RemoteVClock, LocalVClock), riak_dt_vclock:descends(LocalVClock, RemoteVClock)} of
     {true, false} ->
-      get_write(KV, RemoteMap, RemoteVClock);
+      full_update(LocalKV, RemoteMap, RemoteVClock);
     {false, false} ->
-      get_write(KV, RemoteMap, RemoteVClock);
+      full_update(LocalKV, RemoteMap, RemoteVClock);
     %% Either they are equal, or the local one is newer - perhaps trigger AAE?
     _ ->
       false
   end.
-
--spec(get_write(kv(), riak_dt_map:dt_map(), vclock:vclock()) -> {ok, kv()}).
-get_write(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+-spec(full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
+  {ok, kv()}).
+full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   Map1 = riak_dt_map:merge(RemoteMap, KV#kv.map),
-  VClock1 = vclock:merge([LocalVClock, RemoteVClock]),
+  VClock1 = riak_dt_vclock:merge([LocalVClock, RemoteVClock]),
   KV1 = KV#kv{map = Map1, vclock = VClock1},
   {ok, KV1}.
+
+-spec(handle_full_update(map(), state()) -> state()).
+handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
+  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
+  {atomic, _} = mnesia:sync_transaction(Fun),
+  State.
+
 
 
 -spec(aae_snapshot() -> aae_data()).
 aae_snapshot() ->
   MatchSpec = ets:fun2ms(fun(#kv{key = Key, vclock = VClock}) -> {Key, VClock}  end),
-  KeyClocks = ets:select(?MODULE, MatchSpec),
+  KeyClocks = mnesia:dirty_select(kv, MatchSpec),
   orddict:from_list(KeyClocks).
 
 
@@ -357,54 +389,47 @@ aae_snapshot() ->
 %% We send out a set of all our {key, VClock} pairs
 -spec(handle_aae_wakeup(state()) -> state()).
 handle_aae_wakeup(State) ->
-  aae_controlled_snapshot([State#state.last_selected_key], State).
+  aae_controlled_snapshot(State#state.last_selected_key, State).
 
 %% We have more than ?AAE_LUB_LIMIT keys
--spec(aae_controlled_snapshot([key() | '$end_of_table'], state()) -> state()).
-aae_controlled_snapshot(Acc, State) when length(Acc) >= ?AAE_LUB_LIMIT  ->
-  aae_begin_end(Acc, State);
-%% The table is empty
-aae_controlled_snapshot(['$end_of_table', '$end_of_table'], State) ->
-  aae_begin_end([], State);
-%% We're having to reset to the beginning of the table - because the first key that was put in there was end of table
-aae_controlled_snapshot(Acc = ['$end_of_table'], State) ->
-  Key = ets:first(?MODULE),
-  aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key});
-%% We've hit the end of the table
-aae_controlled_snapshot(Acc = ['$end_of_table'| _RestKeys], State) ->
-  aae_begin_end(Acc, State);
-%% We're still traversing the table
-aae_controlled_snapshot(Acc = [PreviousKey|_], State) ->
-  Key = ets:next(?MODULE, PreviousKey),
-  aae_controlled_snapshot([Key|Acc], State#state{last_selected_key = Key}).
+-spec(aae_controlled_snapshot(key() | '$end_of_table', state()) -> state()).
+aae_controlled_snapshot('$end_of_table', State) ->
+  MatchSpec = ets:fun2ms(fun(#kv{key = Key, vclock = VClock}) -> {Key, VClock} end),
+  Result = mnesia:transaction(fun() -> mnesia:select(kv, MatchSpec, ?AAE_LUB_LIMIT, read) end),
+  case Result of
+    {aborted, Reason} ->
+      lager:warning("Mnesia transaction aborted while attempting AAE: ~p", [Reason]),
+      State;
+    %% Empty table
+    {atomic, '$end_of_table'} ->
+      aae_advertise_data(#{aae_data => []}, State);
+    %% We iterated through the entire table, state goes unmodified because it's already going to start at the beginning
+    {atomic, {Objects, _Cont}} when length(Objects) < ?AAE_LUB_LIMIT ->
+      aae_advertise_data(#{aae_data => Objects}, State);
+    %% We started at the beginning of the table, and got to the middle
+    {atomic, {Objects, _Cont}} ->
+      [{LastKey, _VClock}|_] = lists:reverse(Objects),
+      aae_advertise_data(#{aae_data => Objects, end_key => LastKey}, State#state{last_selected_key = LastKey})
+  end;
 
-%% Empty table
--spec(aae_begin_end(keys(), state()) -> state()).
-aae_begin_end([], State) ->
-  aae_advertise_data(#{aae_data => []}, State);
-aae_begin_end(['$end_of_table'], State) ->
-  aae_advertise_data(#{aae_data => []}, State);
-aae_begin_end(Keys = [LastKey|_RestKeys], State) ->
-  [FirstKey|_] = SortedKeys = lists:reverse(Keys),
-  Records = [{Key, ets:lookup_element(?MODULE, Key, #kv.vclock)} || Key <- SortedKeys, Key =/= '$end_of_table'],
-  aae_begin_end(FirstKey, LastKey, Records, State).
-
-%% We iterated through the entire table
--spec(aae_begin_end(key(), key(), [{key(), kv()}], state()) -> state()).
-aae_begin_end('$end_of_table', '$end_of_table', Records, State = #state{last_selected_key = '$end_of_table'}) ->
-  aae_advertise_data(#{aae_data => Records}, State);
-
-%% We started at the beginning of the table, and got to the middle
-aae_begin_end('$end_of_table', LastKey, Records, State) ->
-  aae_advertise_data(#{aae_data => Records, end_key => LastKey}, State);
-
-%% We started in the middle and ended at the end
-aae_begin_end(FirstKey, '$end_of_table', Records, State) ->
-  aae_advertise_data(#{aae_data => Records, start_key => FirstKey}, State);
-
-%% We started in the middle and ended at the middle
-aae_begin_end(FirstKey, LastKey, Records, State) ->
-  aae_advertise_data(#{aae_data => Records, start_key => FirstKey, end_key => LastKey}, State).
+aae_controlled_snapshot(LastSelectedKey, State) ->
+  MatchSpec = ets:fun2ms(fun(#kv{key = Key, vclock = VClock}) when Key >= LastSelectedKey -> {Key, VClock} end),
+  Result = mnesia:transaction(fun() -> mnesia:select(kv, MatchSpec, ?AAE_LUB_LIMIT, read) end),
+  case Result of
+    %% Empty table
+    {aborted, Reason} ->
+      lager:warning("Mnesia transaction aborted while attempting AAE: ~p", [Reason]),
+      State;
+    %% We started in the middle and ended at the the end
+    {atomic, {Objects, _Cont}} when length(Objects) < ?AAE_LUB_LIMIT ->
+      aae_advertise_data(#{aae_data => Objects, start_key => LastSelectedKey},
+        State#state{last_selected_key = '$end_of_table'});
+    %% We started in the middle, and ended in the middle
+    {atomic, {Objects, _Cont}} ->
+      [{LastKey, _VClock}|_] = lists:reverse(Objects),
+      aae_advertise_data(#{aae_data => Objects, start_key => LastSelectedKey, end_key => LastKey},
+        State#state{last_selected_key = LastKey})
+  end.
 
 -spec(aae_advertise_data(map(), state()) -> state()).
 aae_advertise_data(Payload, State) ->

@@ -88,10 +88,10 @@ aae_keys(#{pid := Pid}, State) ->
 -spec(node_clocks() -> [{node(), riak_dt_vclock:vclock()}]).
 node_clocks() ->
   MatchSpec = ets:fun2ms(
-    fun(Member) ->
-      {Member#member.node, Member#member.dvvset}
+    fun(Member = #member{value = Value}) ->
+      {Member#member.node, Value}
     end
   ),
-  NodeDVVs = ets:select(members, MatchSpec),
-  NodeClocks = [{Node, dvvset:join(DVVSet)} || {Node, DVVSet} <- NodeDVVs],
+  Result = ets:select(members, MatchSpec),
+  NodeClocks = [{NodeName, {Epoch, Clock}} || {NodeName, #{epoch := Epoch, clock := Clock}} <- Result],
   orddict:from_list(NodeClocks).

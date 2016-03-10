@@ -14,15 +14,15 @@
 -include("lashup.hrl").
 
 %% API
--export([handle/2, start_link/1, do_handle/1]).
+-export([handle/1, start_link/1, do_handle/1]).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
--record(state, {fanout_pid, seed, nodes_checked = []}).
+-record(state, {fanout_pid, nodes_checked = []}).
 
-handle(Pid, Seed) ->
-  Args = #{lashup_gm_fanout_pid => Pid, seed => Seed},
+handle(Pid) ->
+  Args = #{lashup_gm_fanout_pid => Pid},
   ChildSpec = #{
     id => make_ref(),
     start => {?MODULE, start_link, [Args]},
@@ -40,9 +40,9 @@ start_link(Args) ->
   {ok, Pid}.
 
 %% @private
-do_handle(#{lashup_gm_fanout_pid := Pid, seed := Seed}) ->
+do_handle(#{lashup_gm_fanout_pid := Pid}) ->
   link(Pid),
-  State = #state{fanout_pid = Pid, seed = Seed},
+  State = #state{fanout_pid = Pid},
   start_exchange(State).
 
 start_exchange(State) ->
@@ -76,21 +76,18 @@ send_unchecked_nodes(NodesCheckedSet, State) ->
   unlink(State#state.fanout_pid).
 
 
-handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteVector}},
+handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteClock = {_RemoteEpoch, _RemoteClock}}},
     State = #state{nodes_checked = NodeChecked, fanout_pid = Pid}) ->
-  Key = lashup_utils:nodekey(Node, State#state.seed),
-  case ets:lookup(members, Key) of
+  case ets:lookup(members, Node) of
   [] ->
     State;
-  [Member] ->
+  [Member = #member{value = #{epoch := LocalEpoch, clock := LocalClock}}] ->
     State1 = State#state{nodes_checked = [Node|NodeChecked]},
-    LocalVector = dvvset:join(Member#member.dvvset),
-    case {dvvset:descends(RemoteVector, LocalVector), dvvset:descends(LocalVector, RemoteVector)} of
-      {false, true} ->
+    case RemoteClock < {LocalEpoch, LocalClock} of
+      %% Only send my local version if I have a strictly "newer" clock
+      true ->
         send_event(Pid, Member);
-      {false, false} ->
-        send_event(Pid, Member);
-      _ ->
+      false ->
         ok
     end,
     State1
@@ -102,9 +99,8 @@ send_event(Pid, Member) ->
   erlang:send(Pid, {event, CompressedTerm}, [noconnect]).
 
 
-send_member(Node, State = #state{fanout_pid = Pid}) ->
-  Key = lashup_utils:nodekey(Node, State#state.seed),
-  case ets:lookup(members, Key) of
+send_member(Node, _State = #state{fanout_pid = Pid}) ->
+  case ets:lookup(members, Node) of
     [] ->
       ok;
     [Member] ->
@@ -118,6 +114,6 @@ to_event(Member = #member{}) ->
   #{
     message => updated_node,
     node => Member#member.node,
-    dvvset => Member#member.dvvset,
+    value => Member#member.value,
     ttl => 1
   }.
