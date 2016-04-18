@@ -1,5 +1,6 @@
 # Lashup
 [![Circle CI](https://circleci.com/gh/dcos/lashup.svg?style=svg&circle-token=e109b76cf8a017424100d9269640771210d7efe3)](https://circleci.com/gh/dcos/lashup)
+[![Velocity](http://velocity.mesosphere.com/service/velocity/buildStatus/icon?job=dcos-networking-lashup-master/)](http://velocity.mesosphere.com/service/velocity/job/dcos-networking-lashup-master/)
 
 ### Background
 
