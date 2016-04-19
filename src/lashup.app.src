@@ -1,8 +1,10 @@
 {application, lashup,
  [
-  {description, ""},
+  {description, "Lashup - Distributed control plane"},
   {vsn, "1"},
   {registered, []},
+  {maintainers, ["Sargun Dhillon <sargun@mesosphere.com", "Tyler Neely <tyler@mesosphere.com>"]},
+  {licenses, ["Apache"]},
   {applications, [
                   kernel,
                   stdlib,
