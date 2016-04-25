@@ -1,6 +1,6 @@
 # Lashup
 [![Circle CI](https://circleci.com/gh/dcos/lashup.svg?style=svg&circle-token=e109b76cf8a017424100d9269640771210d7efe3)](https://circleci.com/gh/dcos/lashup)
-[![Velocity](http://velocity.mesosphere.com/service/velocity/buildStatus/icon?job=dcos-networking-lashup-master/)](http://velocity.mesosphere.com/service/velocity/job/dcos-networking-lashup-master/)
+[![Velocity](http://velocity.mesosphere.com/service/velocity/buildStatus/icon?job=public-dcos-networking-lashup-master/)](http://velocity.mesosphere.com/service/velocity/job/public-dcos-networking-lashup-master/)
 ## Summary 
 Lashup is a building block for a distributed control plane. It acts as a failure detector, a distributed fully-replicated CRDT store, and a multicast system. It isn't meant to be used by itself, but rather in conjunction with other components. In this it has several components described below. We currently use it in our [Minuteman Distributed Load Balancer](https://github.com/dcos/minuteman), and we've [publically evaluated](https://github.com/dcos/minuteman#evaluation) its capability for fault tolerance with Minuteman.
  
