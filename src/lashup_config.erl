@@ -19,7 +19,8 @@
   min_departition_probe_interval/0,
   max_mc_replication/0,
   aae_interval/0,
-  work_dir/0
+  work_dir/0,
+  replica/0
 ]).
 
 %% @doc
@@ -94,3 +95,8 @@ work_dir() ->
   WorkDir = application:get_env(lashup, work_dir, "."),
   NodeNameStr = atom_to_list(node()),
   filename:join(WorkDir, NodeNameStr).
+
+%% @doc
+%% Replica - Is this node a replica or not?
+replica() ->
+  application:get_env(lashup, replica, true).

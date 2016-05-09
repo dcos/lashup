@@ -32,8 +32,16 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, { {rest_for_one, 5, 10}, [
-    ?CHILD(lashup_core_sup, supervisor),
-    ?CHILD(lashup_platform_sup, supervisor)
-  ]} }.
+  Children = children(),
+  {ok, { {rest_for_one, 5, 10}, Children} }.
 
+children() ->
+  case lashup_config:replica() of
+    true ->
+      [
+        ?CHILD(lashup_core_sup, supervisor),
+        ?CHILD(lashup_platform_sup, supervisor)
+      ];
+    false ->
+      []
+  end.
