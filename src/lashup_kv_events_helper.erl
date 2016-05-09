@@ -10,7 +10,7 @@
 -author("sdhillon").
 
 %% API
--export([start_link/1, init/1]).
+-export([start_link/1, start_link/2, init/1]).
 
 -record(state, {
   match_spec :: ets:match_spec(),
@@ -22,12 +22,16 @@
 
 -include("lashup_kv.hrl").
 
-%% The matchspec must be in the format fun({Key}) when GuardSpecs -> true end
 start_link(MatchSpec) ->
+  start_link(node, MatchSpec).
+
+%% The matchspec must be in the format fun({Key}) when GuardSpecs -> true end
+start_link(Node, MatchSpec) ->
   Ref = make_ref(),
   MatchSpecCompiled = ets:match_spec_compile(MatchSpec),
   State = #state{pid = self(), match_spec_comp = MatchSpecCompiled, ref = Ref, match_spec = MatchSpec},
-  spawn_link(?MODULE, init, [State]),
+  Pid = spawn_link(Node, ?MODULE, init, [State]),
+  true = is_pid(Pid),
   {ok, Ref}.
 
 init(State) ->
