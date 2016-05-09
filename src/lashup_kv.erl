@@ -22,7 +22,9 @@
 -export([
   start_link/0,
   request_op/2,
-  value/1
+  request_op/3,
+  value/1,
+  value/2
 ]).
 
 %% gen_server callbacks
@@ -66,15 +68,28 @@
 %%% API
 %%%===================================================================
 
+
+
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, Op) ->
-  gen_server:call(?SERVER, {op, Key, Op}).
+  request_op(node(), Key, Op).
+
+-spec(request_op(Node :: node(), Key :: key(), Op :: riak_dt_map:map_op()) ->
+  {ok, riak_dt_map:value()} | {error, Reason :: term()}).
+request_op(Node, Key, Op) ->
+  gen_server:call({?SERVER, Node}, {op, Key, Op}).
+
 
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
   {_, KV} = op_getkv(Key),
   riak_dt_map:value(KV#kv.map).
+
+
+-spec(value(Node :: node(), Key :: key()) -> riak_dt_map:value()).
+value(Node, Key) ->
+  gen_server:call({?SERVER, Node}, {value, Key}).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -146,6 +161,10 @@ init([]) ->
 handle_call({op, Key, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, State),
   {reply, Reply, State1};
+handle_call({value, Key}, _From, State) ->
+  {_, KV} = op_getkv(Key),
+  Value = riak_dt_map:value(KV#kv.map),
+  {reply, {ok, Value}, State};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
