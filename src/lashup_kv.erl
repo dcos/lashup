@@ -164,7 +164,7 @@ handle_call({op, Key, Op}, _From, State) ->
 handle_call({value, Key}, _From, State) ->
   {_, KV} = op_getkv(Key),
   Value = riak_dt_map:value(KV#kv.map),
-  {reply, {ok, Value}, State};
+  {reply, Value, State};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
