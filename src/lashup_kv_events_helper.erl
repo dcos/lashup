@@ -23,7 +23,7 @@
 -include("lashup_kv.hrl").
 
 start_link(MatchSpec) ->
-  start_link(node, MatchSpec).
+  start_link(node(), MatchSpec).
 
 %% The matchspec must be in the format fun({Key}) when GuardSpecs -> true end
 start_link(Node, MatchSpec) ->
