@@ -298,7 +298,7 @@ handle_op(Key, Op, State) ->
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
 check_map(NewKV = #kv{key = Key}) ->
-  case erlang:external_size(NewKV) of
+  case size(erlang:term_to_binary(NewKV, [compressed])) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
       {error, value_too_large};
     Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
