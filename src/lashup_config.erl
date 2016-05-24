@@ -80,7 +80,7 @@ min_departition_probe_interval() ->
 %% @end
 -spec(max_mc_replication() -> pos_integer()).
 max_mc_replication() ->
-  application:get_env(lashup, max_mc_replication, 3).
+  application:get_env(lashup, max_mc_replication, 1).
 
 %% @doc
 %% How often we message our Vector Clocks for AAE in milliseconds

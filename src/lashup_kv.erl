@@ -313,7 +313,7 @@ check_map(NewKV = #kv{key = Key}) ->
 
 -spec (propagate(kv()) -> ok).
 propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
-  Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
+  Payload = #{type => full_update, reason => op, key => Key, map => Map, vclock => VClock},
   lashup_gm_mc:multicast(?MODULE, Payload),
   ok.
 
@@ -339,35 +339,43 @@ handle_lashup_gm_mc_event(Payload, State) ->
   State.
 
 -spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
-  (fun())).
+  fun(() -> kv())).
 mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
   fun() ->
     case mnesia:read(kv, Key, write) of
       [] ->
-        mnesia:write(#kv{key = Key, vclock = RemoteVClock, map = RemoteMap});
+        ok = mnesia:write(KV = #kv{key = Key, vclock = RemoteVClock, map = RemoteMap}),
+        KV;
       [KV] ->
-        maybe_full_update(KV, RemoteMap, RemoteVClock)
+        maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock))
     end
   end.
--spec(maybe_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock())
-    -> {ok, kv()} | false).
-maybe_full_update(LocalKV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+-spec(maybe_full_update({true | false, kv()}) -> kv()).
+maybe_full_update({false, KV}) ->
+  KV;
+maybe_full_update({true, KV}) ->
+  ok = mnesia:write(KV),
+  KV.
+
+-spec(should_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock())
+    -> {true | false, kv()}).
+should_full_update(LocalKV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   case {riak_dt_vclock:descends(RemoteVClock, LocalVClock), riak_dt_vclock:descends(LocalVClock, RemoteVClock)} of
     {true, false} ->
-      full_update(LocalKV, RemoteMap, RemoteVClock);
+      create_full_update(LocalKV, RemoteMap, RemoteVClock);
     {false, false} ->
-      full_update(LocalKV, RemoteMap, RemoteVClock);
+      create_full_update(LocalKV, RemoteMap, RemoteVClock);
     %% Either they are equal, or the local one is newer - perhaps trigger AAE?
     _ ->
-      false
+      {false, LocalKV}
   end.
--spec(full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
-  {ok, kv()}).
-full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+-spec(create_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
+  {true, kv()}).
+create_full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   Map1 = riak_dt_map:merge(RemoteMap, KV#kv.map),
   VClock1 = riak_dt_vclock:merge([LocalVClock, RemoteVClock]),
   KV1 = KV#kv{map = Map1, vclock = VClock1},
-  {ok, KV1}.
+  {true, KV1}.
 
 -spec(handle_full_update(map(), state()) -> state()).
 handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
