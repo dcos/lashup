@@ -17,6 +17,7 @@
   failure_test120/1, failure_test300/1, hyparview_random_kill_test/1, ping_test/1, mc_test/1,
   kv_test/1]).
 
+-define(MAX_MC_REPLICATION, 3).
 
 
 init_per_suite(Config) ->
@@ -345,13 +346,14 @@ check_graph(Nodes, Size) ->
 mc_test(Config) ->
   hyparview_test(Config),
   AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
+  {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, max_mc_replication, ?MAX_MC_REPLICATION]),
   timer:sleep(60000), %% Let things settle out
   [Node1, Node2, Node3] = choose_nodes(AllNodes, 3),
   %% Test general messaging
   {ok, Topic1RefNode1} = lashup_gm_mc_events:remote_subscribe(Node1, [topic1]),
   R1 = make_ref(),
   rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R1, [record_route]]),
-  true = 3 == expect_replies(Topic1RefNode1, R1),
+  true = ?MAX_MC_REPLICATION == expect_replies(Topic1RefNode1, R1),
   timer:sleep(5000),
   %% Make sure that we don't see "old" events
   {ok, Topic1RefNode3} = lashup_gm_mc_events:remote_subscribe(Node3, [topic1]),
@@ -359,7 +361,7 @@ mc_test(Config) ->
   %% Test only nodes
   R2 = make_ref(),
   rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R2, [{only_nodes, [Node3]}]]),
-  true = 3 == expect_replies(Topic1RefNode3, R2),
+  true = ?MAX_MC_REPLICATION == expect_replies(Topic1RefNode3, R2),
   true = 0 == expect_replies(Topic1RefNode1, R2),
   R3 = make_ref(),
   rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R3, [{fanout, 1}]]),
