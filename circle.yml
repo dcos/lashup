@@ -9,7 +9,6 @@ dependencies:
     - ~/.dialyzer_core*
     - ~/.rebar
     - .rebar
-    - _build
     - .cache
     - ~/.cache
   pre:
