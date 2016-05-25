@@ -22,7 +22,9 @@
 -export([
   start_link/0,
   request_op/2,
-  value/1
+  request_op/3,
+  value/1,
+  value2/1
 ]).
 
 %% gen_server callbacks
@@ -71,10 +73,22 @@
 request_op(Key, Op) ->
   gen_server:call(?SERVER, {op, Key, Op}).
 
+
+-spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock(), Op :: riak_dt_map:map_op()) ->
+  {ok, riak_dt_map:value()} | {error, Reason :: term()}).
+request_op(Key, VClock, Op) ->
+  gen_server:call(?SERVER, {op, Key, VClock, Op}).
+
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
   {_, KV} = op_getkv(Key),
   riak_dt_map:value(KV#kv.map).
+
+
+-spec(value2(Key :: key()) -> {riak_dt_map:value(), riak_dt_vclock:vclock()}).
+value2(Key) ->
+  {_, KV} = op_getkv(Key),
+  {riak_dt_map:value(KV#kv.map), KV#kv.vclock}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -143,8 +157,11 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_call({op, Key, VClock, Op}, _From, State) ->
+  {Reply, State1} = handle_op(Key, Op, VClock, State),
+  {reply, Reply, State1};
 handle_call({op, Key, Op}, _From, State) ->
-  {Reply, State1} = handle_op(Key, Op, State),
+  {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
@@ -249,8 +266,9 @@ create_table(kv) ->
   ]).
 
 
--spec(mk_write_fun(Key :: key(), Op :: riak_dt_map:map_op()) -> (fun())).
-mk_write_fun(Key, Op) ->
+-spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
+  (fun())).
+mk_write_fun(Key, OldVClock, Op) ->
   Node = node(),
   fun() ->
     NewKV =
@@ -261,6 +279,8 @@ mk_write_fun(Key, Op) ->
           Dot = {Node, Counter},
           {ok, Map} = riak_dt_map:update(Op, Dot, riak_dt_map:new()),
           #kv{key = Key, vclock = VClock, map = Map};
+        [_ExistingKV = #kv{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
+          mnesia:abort(concurrency_violation);
         [ExistingKV = #kv{vclock = VClock, map = Map}] ->
           VClock1 = riak_dt_vclock:increment(Node, VClock),
           Counter = riak_dt_vclock:get_counter(Node, VClock1),
@@ -277,9 +297,10 @@ mk_write_fun(Key, Op) ->
     NewKV
   end.
 
--spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), State :: state()) -> {Reply :: term(), State1 :: state()}.
-handle_op(Key, Op, State) ->
-  Fun = mk_write_fun(Key, Op),
+-spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
+    State :: state()) -> {Reply :: term(), State1 :: state()}.
+handle_op(Key, Op, OldVClock, State) ->
+  Fun = mk_write_fun(Key, OldVClock, Op),
   case mnesia:sync_transaction(Fun) of
     {atomic, #kv{} = NewKV} ->
       ok = mnesia:sync_log(),
