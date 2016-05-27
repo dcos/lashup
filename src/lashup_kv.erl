@@ -121,6 +121,7 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   init_db(),
+
   rand:seed(exs1024),
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
@@ -164,7 +165,7 @@ handle_call({op, Key, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
 handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+  {reply, {error, unknown_request}, State}.
 
 %%--------------------------------------------------------------------
 %% @private

@@ -998,8 +998,24 @@ handle_ping_rq(State = #state{active_view = ActiveViews, ping_idx = PingIdx}) ->
 handle_ping_failed(Node, State) ->
   disconnect_node(Node, State).
 
+%% Schedule two disconnects
+%% The purpose of this is so that if we wrote some Erlang code that subscribes to the view
+%% and doesn't only use erlang:send(..., [noconnect]), it'll result in reconnecting
+%% This is fairly safe anyways, because we (try to) ensure that the node is not in our active view
+%% when connecting
+
+%% The only condition that this could be problematic is if there was something non-hyparview running
+%% between the two nodes
+%% TODO:
+%% -Add a way to make connections exempt from disconnect
+%% -Run a regular maintenance to make sure our connection count is small
+
+%% The problem with lots of disterl connections is that:
+%% (1) Net Ticks are awful, esp. if we get into a situation where we make a full mesh
+%% (2) Run a regular maintenance and try to prune the nodes() in case something weird (tm) is happening
 schedule_disconnect(Node) ->
-  schedule_disconnect(Node, 25000).
+  schedule_disconnect(Node, 25000),
+  schedule_disconnect(Node, 50000).
 schedule_disconnect(Node, Time) ->
   RandFloat = random:uniform(),
   Multipler = 1 + round(RandFloat),
@@ -1028,12 +1044,36 @@ disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveVi
 
 
 
-handle_maybe_disconnect(Node, State = #state{active_view = ActiveView}) ->
-  case {lists:member(Node, nodes()), lists:member(Node, ActiveView)} of
-    {true, false} ->
+
+handle_maybe_disconnect(Node, State) ->
+  handle_maybe_disconnect1(Node, State).
+
+%% Is this node part of exempt nodes?
+handle_maybe_disconnect1(Node, State) ->
+  ExemptNodes = application:get_env(lashup, exempt_nodes, []),
+  case lists:member(Node, ExemptNodes) of
+    true ->
+      State;
+    false ->
+      handle_maybe_disconnect2(Node, State)
+  end.
+
+%% Is this node not part of my active view
+handle_maybe_disconnect2(Node, State = #state{active_view = ActiveView}) ->
+  case lists:member(Node, ActiveView) of
+    true ->
+      State;
+    false ->
+      handle_maybe_disconnect3(Node, State)
+  end.
+
+%% Is this node even connected?
+handle_maybe_disconnect3(Node, State) ->
+  case lists:member(Node, nodes()) of
+    true ->
       erlang:disconnect_node(Node),
       State;
-    _Else ->
+    false ->
       State
   end.
 
