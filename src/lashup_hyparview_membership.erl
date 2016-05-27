@@ -865,7 +865,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
 
 %% It returns how long to wait until to shuffle again
 try_shuffle(_State = #state{active_view = []}) ->
-  lager:warning("Could not shuffle because active view empty"),
+  lager:info("Could not shuffle because active view empty"),
   10000;
 try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
   %% TODO:
