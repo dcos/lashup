@@ -81,14 +81,15 @@ ci() ->
 boot_timeout() ->
   case ci() of
     false ->
-      10;
+      30;
     true ->
       60
   end.
 
 start_nodes() ->
-  BootTimeout = boot_timeout(),
-  Results = rpc:pmap({ct_slave, start}, [[{monitor_master, true}, {boot_timeout, BootTimeout},
+  Timeout = boot_timeout(),
+  Results = rpc:pmap({ct_slave, start}, [[{monitor_master, true},
+    {boot_timeout, Timeout}, {init_timeout, Timeout}, {startup_timeout, Timeout},
     {erl_flags, "-connect_all false"}]], masters() ++ slaves()),
   ct:pal("Starting nodes: ~p", [Results]),
   Nodes = [NodeName || {ok, NodeName} <- Results],
@@ -413,7 +414,7 @@ kv_test(Config) ->
 
 wait_for_consistency(TotalTime, Interval, Nodes) when TotalTime > 0 ->
   timer:sleep(Interval),
-  case check_nodes_for_consistency(Nodes, Nodes) of
+  case check_nodes_for_consistency(Nodes, Nodes, 0) of
     true ->
       TotalTime;
     false ->
@@ -424,20 +425,23 @@ wait_for_consistency(_TotalTime, _Interval, _Nodes) ->
   ct:fail(never_consistent).
 
 
-check_nodes_for_consistency([], _AllNodes) ->
+check_nodes_for_consistency([], _AllNodes, 0) ->
   true;
-check_nodes_for_consistency([Node | Rest], AllNodes) ->
-  Result =
-    lists:takewhile(
+check_nodes_for_consistency([], _AllNodes, _) ->
+  false;
+check_nodes_for_consistency([Node | Rest], AllNodes, InconsistentNodeCount) ->
+  {ConsistentKeys, InconsistentKeys} =
+    lists:partition(
       fun(OtherNode) ->
         rpc:call(Node, lashup_kv, value, [OtherNode]) == [{{test_counter, riak_dt_pncounter}, 5}]
       end,
       AllNodes
     ),
-  case Result of
-    AllNodes ->
-      check_nodes_for_consistency(Rest, AllNodes);
+  ct:pal("Consistent keys (~p): ~p", [Node, ConsistentKeys]),
+  case InconsistentKeys of
+    [] ->
+      check_nodes_for_consistency(Rest, AllNodes, InconsistentNodeCount);
     _ ->
-      false
+      check_nodes_for_consistency(Rest, AllNodes, InconsistentNodeCount + 1)
   end.
 

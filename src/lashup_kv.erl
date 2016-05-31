@@ -44,13 +44,17 @@
 
 -define(WARN_OBJECT_SIZE_KB, 25).
 -define(REJECT_OBJECT_SIZE_KB, 100).
+-define(MAX_BLOOM_SIZE, 65536). %% 256K
+-define(FALSE_P, 0.01).
+
 
 
 -record(state, {
   mc_ref = erlang:error() :: reference(),
   metadata_snapshot_current = [] :: metadata_snapshot(),
   metadata_snapshot_next = [] :: metadata_snapshot(),
-  last_selected_key = '$end_of_table' :: '$end_of_table' | key()
+  last_selected_key = '$end_of_table' :: '$end_of_table' | key(),
+  bloom_filter = erlang:error(no_bloom_filter) :: lashup_bloom:bloom()
 }).
 
 
@@ -121,7 +125,9 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   init_db(),
-
+  Elements = length(mnesia:dirty_all_keys(kv)),
+  InitialSize = lashup_bloom:calculate_size(Elements, ?FALSE_P),
+  Bloom = build_bloom(InitialSize),
   rand:seed(exs1024),
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
@@ -138,9 +144,20 @@ init([]) ->
           10000
     ))),
 
+  lashup_timers:wakeup_loop(bloom_wakeup,
+        lashup_timers:jitter_uniform(
+          fun lashup_config:bloom_interval/0
+        )),
+
+  %% Check if we need to resize the bloom filter
+  lashup_timers:wakeup_loop(check_bloomfilter,
+    lashup_timers:jitter_uniform(
+        120000
+      )),
+
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
-  State = #state{mc_ref = Reference},
+  State = #state{mc_ref = Reference, bloom_filter = Bloom},
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -204,6 +221,21 @@ handle_info(aae_wakeup, State) ->
 handle_info(metadata_snapshot, State) ->
   State1 = handle_metadata_snapshot(State),
   {noreply, State1};
+handle_info(bloom_wakeup, State) ->
+  handle_bloom_wakeup(State),
+  {noreply, State};
+handle_info(check_bloomfilter, State0 = #state{bloom_filter = BloomFilter0}) ->
+  TotalKeys = length(mnesia:dirty_all_keys(kv)),
+  IdealSize = lashup_bloom:calculate_size(TotalKeys, ?FALSE_P),
+  case lashup_bloom:size(BloomFilter0) of
+    {Words, _HashFunctions} when Words > ?MAX_BLOOM_SIZE ->
+      {noreply, State0};
+    IdealSize ->
+      {noreply, State0};
+    NewSize ->
+      BloomFilter1 = build_bloom(NewSize),
+      {noreply, State0#state{bloom_filter = BloomFilter1}}
+  end;
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
@@ -266,20 +298,27 @@ create_table(kv) ->
     {type, ordered_set}
   ]).
 
+build_bloom(Size) ->
+  Filter0 = lashup_bloom:new(Size),
+  FoldFun = fun(#kv{key = Key}, Acc) -> lashup_bloom:add_element(Key, Acc) end,
+  Fun = fun() -> mnesia:foldl(FoldFun, Filter0, kv) end,
+  {atomic, Filter1} = mnesia:sync_transaction(Fun),
+  Filter1.
 
--spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
-  (fun())).
-mk_write_fun(Key, OldVClock, Op) ->
+-spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op(),
+    BloomFilter :: lashup_bloom:bloom()) -> (fun())).
+mk_write_fun(Key, OldVClock, Op, BloomFilter0) ->
   Node = node(),
   fun() ->
-    NewKV =
+    {NewKV, RetBloomFilter} =
       case mnesia:read(kv, Key, write) of
         [] ->
           VClock = riak_dt_vclock:increment(Node, riak_dt_vclock:fresh()),
           Counter = riak_dt_vclock:get_counter(Node, VClock),
           Dot = {Node, Counter},
           {ok, Map} = riak_dt_map:update(Op, Dot, riak_dt_map:new()),
-          #kv{key = Key, vclock = VClock, map = Map};
+          BloomFilter1 = lashup_bloom:add_element(Key, BloomFilter0),
+          {#kv{key = Key, vclock = VClock, map = Map}, BloomFilter1};
         [_ExistingKV = #kv{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
           mnesia:abort(concurrency_violation);
         [ExistingKV = #kv{vclock = VClock, map = Map}] ->
@@ -287,7 +326,7 @@ mk_write_fun(Key, OldVClock, Op) ->
           Counter = riak_dt_vclock:get_counter(Node, VClock1),
           Dot = {Node, Counter},
           {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
-          ExistingKV#kv{vclock = VClock1, map = Map1}
+          {ExistingKV#kv{vclock = VClock1, map = Map1}, BloomFilter0}
       end,
     case check_map(NewKV) of
       {error, Error} ->
@@ -295,22 +334,22 @@ mk_write_fun(Key, OldVClock, Op) ->
       ok ->
         mnesia:write(NewKV)
     end,
-    NewKV
+    {NewKV, RetBloomFilter}
   end.
 
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
     State :: state()) -> {Reply :: term(), State1 :: state()}.
-handle_op(Key, Op, OldVClock, State) ->
-  Fun = mk_write_fun(Key, OldVClock, Op),
+handle_op(Key, Op, OldVClock, State0 = #state{bloom_filter = BloomFilter0}) ->
+  Fun = mk_write_fun(Key, OldVClock, Op, BloomFilter0),
   case mnesia:sync_transaction(Fun) of
-    {atomic, #kv{} = NewKV} ->
+    {atomic, {#kv{} = NewKV, BloomFilter1}} ->
       ok = mnesia:sync_log(),
       dumped = mnesia:dump_log(),
       propagate(NewKV),
       NewValue = riak_dt_map:value(NewKV#kv.map),
-      {{ok, NewValue}, State};
+      {{ok, NewValue}, State0#state{bloom_filter = BloomFilter1}};
     {aborted, Reason} ->
-      {{error, Reason}, State}
+      {{error, Reason}, State0}
   end.
   %% We really want to make sure this persists and we don't have backwards traveling clocks
 
@@ -356,20 +395,23 @@ handle_lashup_gm_mc_event(Event = #{payload := #{type := lub_advertise}}, State)
   handle_lub_advertise(Event, State);
 handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State) ->
   handle_full_update(Payload, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := bloom_filter}}, State) ->
+  handle_bloom_filter(Event, State);
 handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
 
--spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
-  fun(() -> kv())).
-mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
+-spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock(),
+  BloomFilter0 :: lashup_bloom:bloom()) -> fun(() -> kv())).
+mk_full_update_fun(Key, RemoteMap, RemoteVClock, BloomFilter0) ->
   fun() ->
     case mnesia:read(kv, Key, write) of
       [] ->
         ok = mnesia:write(KV = #kv{key = Key, vclock = RemoteVClock, map = RemoteMap}),
-        KV;
+        BloomFilter1 = lashup_bloom:add_element(Key,  BloomFilter0),
+        {KV, BloomFilter1};
       [KV] ->
-        maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock))
+        {maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock)), BloomFilter0}
     end
   end.
 -spec(maybe_full_update({true | false, kv()}) -> kv()).
@@ -400,10 +442,11 @@ create_full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   {true, KV1}.
 
 -spec(handle_full_update(map(), state()) -> state()).
-handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
-  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
-  {atomic, _} = mnesia:sync_transaction(Fun),
-  State.
+handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap},
+    State0 = #state{bloom_filter = BloomFilter0}) ->
+  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock, BloomFilter0),
+  {atomic, {_, BloomFilter1}} = mnesia:sync_transaction(Fun),
+  State0#state{bloom_filter = BloomFilter1}.
 
 
 
@@ -533,12 +576,11 @@ keys_to_sync(Keys) ->
 
 %% TODO: Add backpressure
 -spec(sync_key(Origin :: node(), KV :: kv()) -> ok).
-sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
+sync_key(Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
   SendAfter = trunc(rand:uniform() * 10000),
   %% Maybe remove {only_nodes, [Origin]} from MCOpts
   %% to generate more random gossip
-  %% Think about adding: {only_nodes, [Origin]}
 
   %% So, it's likely that this update will go the 6 nodes near me.
   %% They can then AAE across the cluster.
@@ -558,7 +600,7 @@ sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   %% -Sargun Dhillon
   %% 2/9/2016
 
-  MCOpts = [{ttl, 1}, {fanout, 1}],
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
   timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts]),
   ok.
 
@@ -601,3 +643,47 @@ divergent_keys(LocalAAEData, RemoteAAEData) ->
 -spec(handle_metadata_snapshot(state()) -> state()).
 handle_metadata_snapshot(State = #state{metadata_snapshot_next = MSN}) ->
   State#state{metadata_snapshot_current = MSN, metadata_snapshot_next = aae_snapshot()}.
+
+handle_bloom_wakeup(_State = #state{bloom_filter = BloomFilter}) ->
+  Payload = #{type => bloom_filter, bloom_filter => BloomFilter},
+  MCOpts = [{ttl, 1}, {fanout, 1}],
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  ok.
+
+handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) when RemoteBloomFilter =:= LocalBloomFilter ->
+  State;
+handle_bloom_filter(Message = #{payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) when size(RemoteBloomFilter) > size(LocalBloomFilter) ->
+  NewBloomFilter = build_bloom(lashup_bloom:size(RemoteBloomFilter)),
+  State1 = State#state{bloom_filter = NewBloomFilter},
+  handle_bloom_filter(Message, State1);
+%% If the remote bloom filter is tinier than ours, ignore it, it'll converge eventually
+handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) when size(RemoteBloomFilter) < size(LocalBloomFilter) ->
+  State;
+handle_bloom_filter(#{origin := Origin, payload := #{bloom_filter := RemoteBloomFilter}}, State) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  MissingKeys =
+    lists:foldl(
+      fun(Key, Acc) ->
+        case lashup_bloom:has_element(Key, RemoteBloomFilter) of
+          true ->
+            Acc;
+          false ->
+            [Key|Acc]
+        end
+      end,
+      [],
+      AllKeys),
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  lager:info("Repairing ~B keys via bloom_filter to node: ~p", [length(MissingKeys), Origin]),
+  lists:foreach(
+    fun(Key) ->
+      {_, #kv{key = Key, vclock = VClock, map = Map}} = op_getkv(Key),
+      Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
+      lashup_gm_mc:multicast(?MODULE, Payload, MCOpts)
+    end,
+    MissingKeys
+  ),
+  State.
