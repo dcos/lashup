@@ -95,7 +95,6 @@ ceiling(X) ->
     T = trunc(X),
     case X - T of
         0.0 -> T;
-        0 -> T;
         _ -> T + 1
     end.
 
