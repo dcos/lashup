@@ -653,16 +653,23 @@ handle_bloom_wakeup(_State = #state{bloom_filter = BloomFilter}) ->
 handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
     State = #state{bloom_filter = LocalBloomFilter}) when RemoteBloomFilter =:= LocalBloomFilter ->
   State;
-handle_bloom_filter(Message = #{payload := #{bloom_filter := RemoteBloomFilter}},
-    State = #state{bloom_filter = LocalBloomFilter}) when size(RemoteBloomFilter) > size(LocalBloomFilter) ->
-  NewBloomFilter = build_bloom(lashup_bloom:size(RemoteBloomFilter)),
-  State1 = State#state{bloom_filter = NewBloomFilter},
-  handle_bloom_filter(Message, State1);
 %% If the remote bloom filter is tinier than ours, ignore it, it'll converge eventually
 handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
     State = #state{bloom_filter = LocalBloomFilter}) when size(RemoteBloomFilter) < size(LocalBloomFilter) ->
   State;
-handle_bloom_filter(#{origin := Origin, payload := #{bloom_filter := RemoteBloomFilter}}, State) ->
+handle_bloom_filter(#{origin := Origin, payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) ->
+  bloom_sync(Origin, RemoteBloomFilter),
+  case lashup_bloom:size(RemoteBloomFilter) > lashup_bloom:size(LocalBloomFilter) of
+    true ->
+      NewSize = lashup_bloom:size(RemoteBloomFilter),
+      LocalBloomFilter1 = build_bloom(NewSize),
+      State#state{bloom_filter = LocalBloomFilter1};
+    false ->
+      State
+  end.
+
+bloom_sync(Origin, RemoteBloomFilter) ->
   AllKeys = mnesia:dirty_all_keys(kv),
   MissingKeys =
     lists:foldl(
@@ -685,5 +692,4 @@ handle_bloom_filter(#{origin := Origin, payload := #{bloom_filter := RemoteBloom
       lashup_gm_mc:multicast(?MODULE, Payload, MCOpts)
     end,
     MissingKeys
-  ),
-  State.
+  ).
