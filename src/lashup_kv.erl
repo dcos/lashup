@@ -683,13 +683,17 @@ bloom_sync(Origin, RemoteBloomFilter) ->
       end,
       [],
       AllKeys),
+  SendAfter = 5000,
   MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
   lager:info("Repairing ~B keys via bloom_filter to node: ~p", [length(MissingKeys), Origin]),
   lists:foreach(
     fun(Key) ->
       {_, #kv{key = Key, vclock = VClock, map = Map}} = op_getkv(Key),
       Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
-      lashup_gm_mc:multicast(?MODULE, Payload, MCOpts)
+      %% We delay the messages by 5 seconds
+      %% The purpose of this is to ensure that the key value has propagated through the system
+      %% and we don't double write
+      timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts])
     end,
     MissingKeys
   ).
