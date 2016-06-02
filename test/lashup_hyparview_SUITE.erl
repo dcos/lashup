@@ -403,8 +403,10 @@ kv_test(Config) ->
   rpc:multicall(?config(slaves, Config), application, ensure_all_started, [lashup]),
   %% Normal value is 5 minutes, let's not wait that long
   {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, aae_interval, 30000]),
+  {_, []} = rpc:multicall(AllNodes, application, set_env, [lashup, key_aae_interval, 30000]),
   Update1 = {update, [{update, {test_counter, riak_dt_pncounter}, {increment, 5}}]},
   [rpc:call(Node, lashup_kv, request_op, [Node, Update1]) || Node <- AllNodes],
+  [rpc:call(Node, lashup_kv, request_op, [god_counter, Update1]) || Node <- AllNodes],
   LeftOverTime1 = wait_for_convergence(600000, 5000, AllNodes),
   ct:pal("Converged in ~p milliseconds", [600000 - LeftOverTime1]),
   LeftOverTime2 = wait_for_consistency(600000, 5000, AllNodes),
@@ -437,8 +439,19 @@ check_nodes_for_consistency([Node | Rest], AllNodes, InconsistentNodeCount) ->
       end,
       AllNodes
     ),
-  ct:pal("Consistent keys (~p): ~p", [Node, ConsistentKeys]),
-  case InconsistentKeys of
+  ExpectedGodCounterValue = length(AllNodes) * 5,
+  {ConsistentKeys1, InconsistentKeys1} =
+    case rpc:call(Node, lashup_kv, value, [god_counter]) of
+      [{{test_counter, riak_dt_pncounter}, ExpectedGodCounterValue}] ->
+        {[god_counter|ConsistentKeys], InconsistentKeys};
+      GodCounter ->
+        ct:pal("God counter (~p): ~p", [Node, GodCounter]),
+        {ConsistentKeys, [god_counter|InconsistentKeys]}
+    end,
+  ct:pal("Consistent keys (~p): ~p", [Node, ConsistentKeys1]),
+  ct:pal("Inconsistent keys (~p): ~p", [Node, InconsistentKeys1]),
+
+  case InconsistentKeys1 of
     [] ->
       check_nodes_for_consistency(Rest, AllNodes, InconsistentNodeCount);
     _ ->

@@ -48,8 +48,20 @@
 -define(FALSE_P, 0.01).
 
 
+-record(bucket_hash_cache_entry, {
+  total_keys :: non_neg_integer(),
+  hash :: binary()
+}).
+-type bucket_hash_cache_entry() :: #bucket_hash_cache_entry{}.
+
+-record(bucket_hash_cache, {
+  total_keys :: non_neg_integer(),
+  buckets_cache :: orddict:orddict(non_neg_integer(), bucket_hash_cache_entry())
+}).
+-type bucket_hash_cache() :: #bucket_hash_cache{}.
 
 -record(state, {
+  bucket_hashes = undefined :: bucket_hash_cache() | undefined,
   mc_ref = erlang:error() :: reference(),
   metadata_snapshot_current = [] :: metadata_snapshot(),
   metadata_snapshot_next = [] :: metadata_snapshot(),
@@ -155,6 +167,13 @@ init([]) ->
         120000
       )),
 
+  lashup_timers:wakeup_loop(key_aae_wakeup,
+    lashup_timers:wait(10000,
+      lashup_timers:linear_ramp_up(2,
+        lashup_timers:jitter_uniform(
+          fun lashup_config:key_aae_interval/0
+        )))),
+
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
   State = #state{mc_ref = Reference, bloom_filter = Bloom},
@@ -214,6 +233,9 @@ handle_cast(_Request, State) ->
   {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
   State1 = handle_lashup_gm_mc_event(Event, State),
+  {noreply, State1};
+handle_info(key_aae_wakeup, State) ->
+  State1 = handle_key_aae_wakeup(State),
   {noreply, State1};
 handle_info(aae_wakeup, State) ->
   State1 = handle_aae_wakeup(State),
@@ -397,6 +419,12 @@ handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State)
   handle_full_update(Payload, State);
 handle_lashup_gm_mc_event(Event = #{payload := #{type := bloom_filter}}, State) ->
   handle_bloom_filter(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := bucket_hashes}}, State) ->
+  handle_bucket_hashes(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := do_you_have_key}}, State) ->
+  handle_do_you_have_key(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := request_kv}}, State) ->
+  handle_request_kv(Event, State);
 handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
@@ -647,7 +675,11 @@ handle_metadata_snapshot(State = #state{metadata_snapshot_next = MSN}) ->
 handle_bloom_wakeup(_State = #state{bloom_filter = BloomFilter}) ->
   Payload = #{type => bloom_filter, bloom_filter => BloomFilter},
   MCOpts = [{ttl, 1}, {fanout, 1}],
-  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  SendAfter = 5000,
+  %% We delay the messages by 5 seconds
+  %% The purpose of this is to ensure that the key value has propagated through the system
+  %% and we don't double write
+  timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts]),
   ok.
 
 handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
@@ -683,17 +715,113 @@ bloom_sync(Origin, RemoteBloomFilter) ->
       end,
       [],
       AllKeys),
-  SendAfter = 5000,
   MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
   lager:info("Repairing ~B keys via bloom_filter to node: ~p", [length(MissingKeys), Origin]),
   lists:foreach(
     fun(Key) ->
       {_, #kv{key = Key, vclock = VClock, map = Map}} = op_getkv(Key),
       Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
-      %% We delay the messages by 5 seconds
-      %% The purpose of this is to ensure that the key value has propagated through the system
-      %% and we don't double write
-      timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts])
+      lashup_gm_mc:multicast(?MODULE, Payload, MCOpts)
     end,
     MissingKeys
   ).
+
+%% This should rarely find missing keys, because the bloom filter should catch it.
+handle_key_aae_wakeup(State0) ->
+  lager:info("Performing Key AAE"),
+  TotalKeys = mnesia:table_info(kv, size),
+  {State1, BHC} = get_bucket_hash_cache(TotalKeys, State0),
+  Payload = #{type => bucket_hashes, bucket_hashes => BHC},
+  MCOpts = [{ttl, 1}, {fanout, 1}],
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  State1.
+
+get_bucket_hash_cache(TotalKeys, State0 = #state{bucket_hashes = BHC = #bucket_hash_cache{total_keys = TotalKeys}}) ->
+  {State0, BHC};
+get_bucket_hash_cache(_OldTotalKeys, State0) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  BHC = bucket_hashes(AllKeys),
+  State1 = State0#state{bucket_hashes = BHC},
+  {State1, BHC}.
+
+bucket_hashes(AllKeys) ->
+  TotalKeys = length(AllKeys),
+  BucketCount = trunc((TotalKeys + 1) / 100.0) + 1,
+  lager:debug("Bucket Count: ~p", [BucketCount]),
+  BHCEs =
+    [{BucketNum, build_cache_entry(AllKeys, BucketNum, BucketCount)}
+      || BucketNum <- lists:seq(0, BucketCount - 1)],
+
+  #bucket_hash_cache{buckets_cache = BHCEs, total_keys = TotalKeys}.
+
+build_cache_entry(AllKeys, BucketNum, BucketCount) ->
+  Keys0 = keys_by_bucket(BucketNum, BucketCount, AllKeys),
+  Keys1 = lists:usort(Keys0),
+  lager:debug("Hashing keys: ~p", [Keys1]),
+  #bucket_hash_cache_entry{hash = erlang:phash2(Keys1), total_keys = length(Keys1)}.
+
+
+%% Noop
+handle_bucket_hashes(#{payload := #{bucket_hashes := BucketHashes}}, State = #state{bucket_hashes = BucketHashes}) ->
+  lager:debug("Found equal hashes"),
+  State;
+handle_bucket_hashes(#{origin := Origin, payload := #{bucket_hashes := RemoteBH}}, State0) ->
+  TotalKeys = mnesia:table_info(kv, size),
+  {State1, LocalBHC} = get_bucket_hash_cache(TotalKeys, State0),
+  KeysToSend = sync_bucket_hashes(RemoteBH, LocalBHC),
+  lager:debug("Hash comparison mechanism should send ~B keys to ~p", [length(KeysToSend), Origin]),
+  lists:foreach(fun(Key) -> advertise_key(Origin, Key) end, KeysToSend),
+  State1.
+
+advertise_key(Origin, Key) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  Payload = #{type => do_you_have_key, reason => bucket_hashes, key => Key},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts).
+
+
+sync_bucket_hashes(#bucket_hash_cache{buckets_cache = RBuckets}, #bucket_hash_cache{buckets_cache = LBuckets})
+  when length(RBuckets) =/= length(LBuckets) ->
+  BucketCount = length(RBuckets),
+  AllKeys = mnesia:dirty_all_keys(kv),
+  BHCEs =
+    [{BucketNum, build_cache_entry(AllKeys, BucketNum, BucketCount)}
+      || BucketNum <- lists:seq(0, BucketCount - 1)],
+  sync_bucket_bucket_cache_entries(AllKeys, RBuckets, BHCEs);
+sync_bucket_hashes(#bucket_hash_cache{buckets_cache = RBuckets}, #bucket_hash_cache{buckets_cache = LBuckets}) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  sync_bucket_bucket_cache_entries(AllKeys, RBuckets, LBuckets).
+
+sync_bucket_bucket_cache_entries(AllKeys, Remote, Local) ->
+  RemoteLength = length(Remote) ,
+  LocalLength = length(Local),
+  true = RemoteLength == LocalLength,
+  LocalBucketHashes = [{N, Hash} || {N, #bucket_hash_cache_entry{hash = Hash}} <- Local],
+  RemoteBucketHashes = [{N, Hash} || {N, #bucket_hash_cache_entry{hash = Hash}} <- Remote],
+  ZippedHashes = lists:zip(LocalBucketHashes, RemoteBucketHashes),
+  MismatchedBuckets = [N || {{N, LocalHash}, {N, RemoteHash}} <- ZippedHashes, LocalHash =/= RemoteHash],
+  lists:flatmap(fun(X) -> keys_by_bucket(X, LocalLength, AllKeys) end, MismatchedBuckets).
+
+keys_by_bucket(BucketNum, BucketCount, AllKeys) ->
+  lists:filter(fun(X) -> erlang:phash2(X, BucketCount) == BucketNum end, AllKeys).
+
+handle_do_you_have_key(#{origin := Origin, payload := #{key := Key}}, State) ->
+  case op_getkv(Key) of
+    {new, _} ->
+      request_kv(Origin, Key);
+    {existing, _} ->
+      ok
+  end,
+  State.
+
+request_kv(Origin, Key) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  Payload = #{type => request_kv, key => Key},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts).
+
+handle_request_kv(#{origin := Origin, payload := #{key := Key}}, State) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  {_, #kv{key = Key, map = Map, vclock = VClock}} = op_getkv(Key),
+  Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  State.
+
