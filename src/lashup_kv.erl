@@ -50,7 +50,7 @@
 
 -record(bucket_hash_cache_entry, {
   total_keys :: non_neg_integer(),
-  hash :: binary()
+  hash :: non_neg_integer()
 }).
 -type bucket_hash_cache_entry() :: #bucket_hash_cache_entry{}.
 
@@ -168,7 +168,7 @@ init([]) ->
       )),
 
   lashup_timers:wakeup_loop(key_aae_wakeup,
-    lashup_timers:wait(10000,
+    lashup_timers:wait(120000,
       lashup_timers:linear_ramp_up(2,
         lashup_timers:jitter_uniform(
           fun lashup_config:key_aae_interval/0
