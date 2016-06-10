@@ -65,7 +65,7 @@
   monitors = [] :: [monitor()],
   fixed_seed,
   idx = 1 :: pos_integer(),
-  unfilled_active_set_count = 0,
+  unfilled_active_set_count = 0, %% Number of times I've tried to neighbor and I've not seen an active set
   init_time = erlang:error(init_time_unset) :: integer(),
   messages = [],
   join_window,
@@ -81,6 +81,7 @@
 
 -type join_success() :: map().
 -type join() :: map().
+-type join_deny() :: map().
 -type forward_join() :: map().
 -type disconnect() :: map().
 -type neighbor() :: map().
@@ -89,7 +90,7 @@
 -type shuffle() :: map().
 -type shuffle_reply() :: map().
 -type hyparview_message() :: join_success() | join() | forward_join() | disconnect() | neighbor() | neighbor_deny() |
-                             neighbor_accept() | shuffle() | shuffle_reply().
+                             neighbor_accept() | shuffle() | shuffle_reply() | join_deny().
 
 %%%===================================================================
 %%% API
@@ -339,11 +340,11 @@ code_change(_OldVsn, State, _Extra) ->
 
 -spec(handle_message_cast(hyparview_message(), State :: state()) -> state()).
 handle_message_cast(JoinSuccess = #{message := join_success}, State) ->
-  State1 = handle_join_success(JoinSuccess, State),
-  check_state(State1);
+  check_state(handle_join_success(JoinSuccess, State));
+handle_message_cast(JoinDeny = #{message := join_deny}, State) ->
+  check_state(handle_join_deny(JoinDeny, State));
 handle_message_cast(_Join = #{message := join, sender := Node, ref := Ref}, State) ->
-  State1 = handle_join(Node, State, Ref),
-  check_state(State1);
+  check_state(handle_join(Node, State, Ref));
 handle_message_cast(ForwardJoin = #{message := forward_join}, State) ->
   State1 = handle_forward_join(ForwardJoin, State),
   push_state(State1),
@@ -357,17 +358,16 @@ handle_message_cast(Neighbor = #{message := neighbor}, State) ->
   push_state(State1),
   check_state(State1);
 handle_message_cast(NeighborDeny = #{message := neighbor_deny}, State) ->
-  State1 = handle_neighbor_deny(NeighborDeny, State),
-  check_state(State1);
+  check_state(handle_neighbor_deny(NeighborDeny, State));
 handle_message_cast(NeighborAccept = #{message := neighbor_accept}, State) ->
-  State1 = handle_neighbor_accept(NeighborAccept, State),
-  check_state(State1);
+  check_state(handle_neighbor_accept(NeighborAccept, State));
 handle_message_cast(Shuffle = #{message := shuffle}, State) ->
-  State1 = handle_shuffle(Shuffle, State),
-  check_state(State1);
+  check_state(handle_shuffle(Shuffle, State));
 handle_message_cast(ShuffleReply = #{message := shuffle_reply}, State) ->
-  State1 = handle_shuffle_reply(ShuffleReply, State),
-  check_state(State1).
+  check_state(handle_shuffle_reply(ShuffleReply, State));
+handle_message_cast(UnknownMessage, State) ->
+  lager:warning("Received unknown lashup message: ~p", [UnknownMessage]),
+  State.
 
 %% RESCHEDULING Functions
 %% Ping every one of my neighbors at least every second
@@ -428,13 +428,13 @@ do_join(State) ->
 try_connect_then_join(Node) ->
   case net_adm:ping(Node) of
     pong ->
-      try_join(Node);
+      join(Node);
     _ ->
       {error, could_not_connect}
   end.
 
--spec(try_join(node()) -> ok).
-try_join(Node) ->
+-spec(join(node()) -> ok).
+join(Node) ->
   {ok, Ref} = timer:send_after(1000, join_failed),
   gen_server:cast({?SERVER, Node}, #{message => join, sender => node(), ref => Ref}).
 
@@ -465,6 +465,7 @@ handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveV
   lager:debug("Saw join from ~p", [Node]),
   State1 =
   case lashup_utils:count_ticks(JoinWindow) of
+    %% Limit it to 25 joins/sec if the active view is full
     Num when length(ActiveView) == ?ACTIVE_VIEW_SIZE andalso Num < 25 ->
       really_handle_join(Node, State, Ref);
     %% If the active view is less than that, throttle to 1 / sec
@@ -473,6 +474,7 @@ handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveV
     %% Else, drop it
     WindowSize ->
       lager:warning("Throttling joins, window size: ~p, active view size: ~p", [WindowSize, length(ActiveView)]),
+      deny_join(State, Node, Ref),
       State
   end,
   push_state(State1),
@@ -480,13 +482,20 @@ handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveV
 
 handle_join(_, State, _) -> State.
 
--spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
+-spec(deny_join(State :: state(), Node :: node(), Ref :: reference()) -> ok).
+deny_join(_State = #state{active_view = ActiveView}, Node, Ref) ->
+  Reply = #{message => join_deny, sender => node(), ref => Ref, active_view => ActiveView},
+  gen_server:cast({?SERVER, Node}, Reply).
+
+
+  -spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
   case try_add_node_to_active_view(Node, State) of
     {ok, NewState = #state{active_view = ActiveView, passive_view = PassiveView}} ->
       ARWL = lashup_config:arwl(),
       Fanout = ordsets:del_element(Node, ActiveView),
-      gen_server:abcast(Fanout, ?SERVER, #{message => forward_join, node => Node, ttl => ARWL, sender => node()}),
+      ForwardJoinMessage = #{message => forward_join, node => Node, ttl => ARWL, sender => node(), seen => [node()]},
+      gen_server:abcast(Fanout, ?SERVER, ForwardJoinMessage),
       Reply = #{message => join_success, sender => node(), ref => Ref, passive_view => PassiveView},
       gen_server:cast({?SERVER, Node}, Reply),
       JoinWindow1 = lashup_utils:add_tick(JoinWindow),
@@ -494,6 +503,23 @@ really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
     {error, NewState} ->
       NewState
   end.
+
+-spec(handle_join_deny(join_deny(), state()) -> state()).
+handle_join_deny(_JoinDeny =  #{message := join_deny, sender := Sender, ref := Ref, active_view := RemoteActiveView},
+    State = #state{active_view = []})->
+  ContactNodes = contact_nodes(State),
+  ProhibitedNodes = ordsets:add_element(Sender, ContactNodes),
+  case ordsets:subtract(RemoteActiveView, ProhibitedNodes) of
+    [] ->
+      State;
+    RemoteActiveView1 ->
+      timer:cancel(Ref),
+      Node = choose_node(RemoteActiveView1),
+      join(Node),
+      State
+  end;
+handle_join_deny(_JoinDeny, State) ->
+  State.
 
 -spec(handle_join_success(join_success(), state()) -> state()).
 handle_join_success(_JoinSuccess =
@@ -578,16 +604,30 @@ handle_forward_join(ForwardJoin = #{node := Node, ttl := TTL}, State) ->
   forward_forward_join(ForwardJoin, State1),
   State1.
 
+forward_forward_join(ForwardJoin = #{ttl := TTL, node := Node, seen := Seen},
+    #state{active_view = ActiveView}) ->
+  Seen1 = ordsets:add_element(node(), Seen),
+  ForwardJoin1 = ForwardJoin#{ttl => TTL - 1, sender := node(), seen := Seen1},
+  case ordsets:subtract(ActiveView, Seen) of
+    [] ->
+      lager:warning("Forwarding join original node ~p dropped", [Node]);
+    Nodes ->
+      forward_forward_join1(ForwardJoin1, Nodes)
+  end;
 forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}, #state{active_view = ActiveView}) ->
   ForwardJoin1 = ForwardJoin#{ttl => TTL - 1, sender := node()},
   case ordsets:del_element(Sender, ActiveView) of
     [] ->
       lager:warning("Forwarding join original node ~p dropped", [Node]);
     Nodes ->
-      Idx = random:uniform(length(Nodes)),
-      TargetNode = lists:nth(Idx, Nodes),
-      gen_server:cast({?SERVER, TargetNode}, ForwardJoin1)
+      forward_forward_join1(ForwardJoin1, Nodes)
   end.
+
+forward_forward_join1(ForwardJoin, Nodes) when is_list(Nodes) ->
+  Idx = random:uniform(length(Nodes)),
+  TargetNode = lists:nth(Idx, Nodes),
+  gen_server:cast({?SERVER, TargetNode}, ForwardJoin).
+
 
 %% TODO:
 %% Maybe we should disconnect from the node at this point?
@@ -865,7 +905,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
 
 %% It returns how long to wait until to shuffle again
 try_shuffle(_State = #state{active_view = []}) ->
-  lager:warning("Could not shuffle because active view empty"),
+  lager:info("Could not shuffle because active view empty"),
   10000;
 try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
   %% TODO:
@@ -998,8 +1038,24 @@ handle_ping_rq(State = #state{active_view = ActiveViews, ping_idx = PingIdx}) ->
 handle_ping_failed(Node, State) ->
   disconnect_node(Node, State).
 
+%% Schedule two disconnects
+%% The purpose of this is so that if we wrote some Erlang code that subscribes to the view
+%% and doesn't only use erlang:send(..., [noconnect]), it'll result in reconnecting
+%% This is fairly safe anyways, because we (try to) ensure that the node is not in our active view
+%% when connecting
+
+%% The only condition that this could be problematic is if there was something non-hyparview running
+%% between the two nodes
+%% TODO:
+%% -Add a way to make connections exempt from disconnect
+%% -Run a regular maintenance to make sure our connection count is small
+
+%% The problem with lots of disterl connections is that:
+%% (1) Net Ticks are awful, esp. if we get into a situation where we make a full mesh
+%% (2) Run a regular maintenance and try to prune the nodes() in case something weird (tm) is happening
 schedule_disconnect(Node) ->
-  schedule_disconnect(Node, 25000).
+  schedule_disconnect(Node, 25000),
+  schedule_disconnect(Node, 50000).
 schedule_disconnect(Node, Time) ->
   RandFloat = random:uniform(),
   Multipler = 1 + round(RandFloat),
@@ -1028,12 +1084,36 @@ disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveVi
 
 
 
-handle_maybe_disconnect(Node, State = #state{active_view = ActiveView}) ->
-  case {lists:member(Node, nodes()), lists:member(Node, ActiveView)} of
-    {true, false} ->
+
+handle_maybe_disconnect(Node, State) ->
+  handle_maybe_disconnect1(Node, State).
+
+%% Is this node part of exempt nodes?
+handle_maybe_disconnect1(Node, State) ->
+  ExemptNodes = application:get_env(lashup, exempt_nodes, []),
+  case lists:member(Node, ExemptNodes) of
+    true ->
+      State;
+    false ->
+      handle_maybe_disconnect2(Node, State)
+  end.
+
+%% Is this node not part of my active view
+handle_maybe_disconnect2(Node, State = #state{active_view = ActiveView}) ->
+  case lists:member(Node, ActiveView) of
+    true ->
+      State;
+    false ->
+      handle_maybe_disconnect3(Node, State)
+  end.
+
+%% Is this node even connected?
+handle_maybe_disconnect3(Node, State) ->
+  case lists:member(Node, nodes()) of
+    true ->
       erlang:disconnect_node(Node),
       State;
-    _Else ->
+    false ->
       State
   end.
 

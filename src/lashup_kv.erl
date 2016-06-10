@@ -22,7 +22,9 @@
 -export([
   start_link/0,
   request_op/2,
-  value/1
+  request_op/3,
+  value/1,
+  value2/1
 ]).
 
 %% gen_server callbacks
@@ -42,13 +44,29 @@
 
 -define(WARN_OBJECT_SIZE_KB, 25).
 -define(REJECT_OBJECT_SIZE_KB, 100).
+-define(MAX_BLOOM_SIZE, 65536). %% 256K
+-define(FALSE_P, 0.01).
 
+
+-record(bucket_hash_cache_entry, {
+  total_keys :: non_neg_integer(),
+  hash :: non_neg_integer()
+}).
+-type bucket_hash_cache_entry() :: #bucket_hash_cache_entry{}.
+
+-record(bucket_hash_cache, {
+  total_keys :: non_neg_integer(),
+  buckets_cache :: orddict:orddict(non_neg_integer(), bucket_hash_cache_entry())
+}).
+-type bucket_hash_cache() :: #bucket_hash_cache{}.
 
 -record(state, {
+  bucket_hashes = undefined :: bucket_hash_cache() | undefined,
   mc_ref = erlang:error() :: reference(),
   metadata_snapshot_current = [] :: metadata_snapshot(),
   metadata_snapshot_next = [] :: metadata_snapshot(),
-  last_selected_key = '$end_of_table' :: '$end_of_table' | key()
+  last_selected_key = '$end_of_table' :: '$end_of_table' | key(),
+  bloom_filter = erlang:error(no_bloom_filter) :: lashup_bloom:bloom()
 }).
 
 
@@ -71,10 +89,22 @@
 request_op(Key, Op) ->
   gen_server:call(?SERVER, {op, Key, Op}).
 
+
+-spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock(), Op :: riak_dt_map:map_op()) ->
+  {ok, riak_dt_map:value()} | {error, Reason :: term()}).
+request_op(Key, VClock, Op) ->
+  gen_server:call(?SERVER, {op, Key, VClock, Op}).
+
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
   {_, KV} = op_getkv(Key),
   riak_dt_map:value(KV#kv.map).
+
+
+-spec(value2(Key :: key()) -> {riak_dt_map:value(), riak_dt_vclock:vclock()}).
+value2(Key) ->
+  {_, KV} = op_getkv(Key),
+  {riak_dt_map:value(KV#kv.map), KV#kv.vclock}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -107,6 +137,9 @@ start_link() ->
   {stop, Reason :: term()} | ignore).
 init([]) ->
   init_db(),
+  Elements = length(mnesia:dirty_all_keys(kv)),
+  InitialSize = lashup_bloom:calculate_size(Elements, ?FALSE_P),
+  Bloom = build_bloom(InitialSize),
   rand:seed(exs1024),
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
@@ -123,9 +156,27 @@ init([]) ->
           10000
     ))),
 
+  lashup_timers:wakeup_loop(bloom_wakeup,
+        lashup_timers:jitter_uniform(
+          fun lashup_config:bloom_interval/0
+        )),
+
+  %% Check if we need to resize the bloom filter
+  lashup_timers:wakeup_loop(check_bloomfilter,
+    lashup_timers:jitter_uniform(
+        120000
+      )),
+
+  lashup_timers:wakeup_loop(key_aae_wakeup,
+    lashup_timers:wait(120000,
+      lashup_timers:linear_ramp_up(2,
+        lashup_timers:jitter_uniform(
+          fun lashup_config:key_aae_interval/0
+        )))),
+
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
-  State = #state{mc_ref = Reference},
+  State = #state{mc_ref = Reference, bloom_filter = Bloom},
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -143,11 +194,14 @@ init([]) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_call({op, Key, VClock, Op}, _From, State) ->
+  {Reply, State1} = handle_op(Key, Op, VClock, State),
+  {reply, Reply, State1};
 handle_call({op, Key, Op}, _From, State) ->
-  {Reply, State1} = handle_op(Key, Op, State),
+  {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
 handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+  {reply, {error, unknown_request}, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -180,12 +234,30 @@ handle_cast(_Request, State) ->
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
   State1 = handle_lashup_gm_mc_event(Event, State),
   {noreply, State1};
+handle_info(key_aae_wakeup, State) ->
+  State1 = handle_key_aae_wakeup(State),
+  {noreply, State1};
 handle_info(aae_wakeup, State) ->
   State1 = handle_aae_wakeup(State),
   {noreply, State1};
 handle_info(metadata_snapshot, State) ->
   State1 = handle_metadata_snapshot(State),
   {noreply, State1};
+handle_info(bloom_wakeup, State) ->
+  handle_bloom_wakeup(State),
+  {noreply, State};
+handle_info(check_bloomfilter, State0 = #state{bloom_filter = BloomFilter0}) ->
+  TotalKeys = length(mnesia:dirty_all_keys(kv)),
+  IdealSize = lashup_bloom:calculate_size(TotalKeys, ?FALSE_P),
+  case lashup_bloom:size(BloomFilter0) of
+    {Words, _HashFunctions} when Words > ?MAX_BLOOM_SIZE ->
+      {noreply, State0};
+    IdealSize ->
+      {noreply, State0};
+    NewSize ->
+      BloomFilter1 = build_bloom(NewSize),
+      {noreply, State0#state{bloom_filter = BloomFilter1}}
+  end;
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
@@ -248,25 +320,35 @@ create_table(kv) ->
     {type, ordered_set}
   ]).
 
+build_bloom(Size) ->
+  Filter0 = lashup_bloom:new(Size),
+  FoldFun = fun(#kv{key = Key}, Acc) -> lashup_bloom:add_element(Key, Acc) end,
+  Fun = fun() -> mnesia:foldl(FoldFun, Filter0, kv) end,
+  {atomic, Filter1} = mnesia:sync_transaction(Fun),
+  Filter1.
 
--spec(mk_write_fun(Key :: key(), Op :: riak_dt_map:map_op()) -> (fun())).
-mk_write_fun(Key, Op) ->
+-spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op(),
+    BloomFilter :: lashup_bloom:bloom()) -> (fun())).
+mk_write_fun(Key, OldVClock, Op, BloomFilter0) ->
   Node = node(),
   fun() ->
-    NewKV =
+    {NewKV, RetBloomFilter} =
       case mnesia:read(kv, Key, write) of
         [] ->
           VClock = riak_dt_vclock:increment(Node, riak_dt_vclock:fresh()),
           Counter = riak_dt_vclock:get_counter(Node, VClock),
           Dot = {Node, Counter},
           {ok, Map} = riak_dt_map:update(Op, Dot, riak_dt_map:new()),
-          #kv{key = Key, vclock = VClock, map = Map};
+          BloomFilter1 = lashup_bloom:add_element(Key, BloomFilter0),
+          {#kv{key = Key, vclock = VClock, map = Map}, BloomFilter1};
+        [_ExistingKV = #kv{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
+          mnesia:abort(concurrency_violation);
         [ExistingKV = #kv{vclock = VClock, map = Map}] ->
           VClock1 = riak_dt_vclock:increment(Node, VClock),
           Counter = riak_dt_vclock:get_counter(Node, VClock1),
           Dot = {Node, Counter},
           {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
-          ExistingKV#kv{vclock = VClock1, map = Map1}
+          {ExistingKV#kv{vclock = VClock1, map = Map1}, BloomFilter0}
       end,
     case check_map(NewKV) of
       {error, Error} ->
@@ -274,21 +356,22 @@ mk_write_fun(Key, Op) ->
       ok ->
         mnesia:write(NewKV)
     end,
-    NewKV
+    {NewKV, RetBloomFilter}
   end.
 
--spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), State :: state()) -> {Reply :: term(), State1 :: state()}.
-handle_op(Key, Op, State) ->
-  Fun = mk_write_fun(Key, Op),
+-spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
+    State :: state()) -> {Reply :: term(), State1 :: state()}.
+handle_op(Key, Op, OldVClock, State0 = #state{bloom_filter = BloomFilter0}) ->
+  Fun = mk_write_fun(Key, OldVClock, Op, BloomFilter0),
   case mnesia:sync_transaction(Fun) of
-    {atomic, #kv{} = NewKV} ->
+    {atomic, {#kv{} = NewKV, BloomFilter1}} ->
       ok = mnesia:sync_log(),
       dumped = mnesia:dump_log(),
       propagate(NewKV),
       NewValue = riak_dt_map:value(NewKV#kv.map),
-      {{ok, NewValue}, State};
+      {{ok, NewValue}, State0#state{bloom_filter = BloomFilter1}};
     {aborted, Reason} ->
-      {{error, Reason}, State}
+      {{error, Reason}, State0}
   end.
   %% We really want to make sure this persists and we don't have backwards traveling clocks
 
@@ -334,20 +417,29 @@ handle_lashup_gm_mc_event(Event = #{payload := #{type := lub_advertise}}, State)
   handle_lub_advertise(Event, State);
 handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State) ->
   handle_full_update(Payload, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := bloom_filter}}, State) ->
+  handle_bloom_filter(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := bucket_hashes}}, State) ->
+  handle_bucket_hashes(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := do_you_have_key}}, State) ->
+  handle_do_you_have_key(Event, State);
+handle_lashup_gm_mc_event(Event = #{payload := #{type := request_kv}}, State) ->
+  handle_request_kv(Event, State);
 handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
 
--spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
-  fun(() -> kv())).
-mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
+-spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock(),
+  BloomFilter0 :: lashup_bloom:bloom()) -> fun(() -> kv())).
+mk_full_update_fun(Key, RemoteMap, RemoteVClock, BloomFilter0) ->
   fun() ->
     case mnesia:read(kv, Key, write) of
       [] ->
         ok = mnesia:write(KV = #kv{key = Key, vclock = RemoteVClock, map = RemoteMap}),
-        KV;
+        BloomFilter1 = lashup_bloom:add_element(Key,  BloomFilter0),
+        {KV, BloomFilter1};
       [KV] ->
-        maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock))
+        {maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock)), BloomFilter0}
     end
   end.
 -spec(maybe_full_update({true | false, kv()}) -> kv()).
@@ -378,10 +470,11 @@ create_full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   {true, KV1}.
 
 -spec(handle_full_update(map(), state()) -> state()).
-handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
-  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
-  {atomic, _} = mnesia:sync_transaction(Fun),
-  State.
+handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap},
+    State0 = #state{bloom_filter = BloomFilter0}) ->
+  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock, BloomFilter0),
+  {atomic, {_, BloomFilter1}} = mnesia:sync_transaction(Fun),
+  State0#state{bloom_filter = BloomFilter1}.
 
 
 
@@ -511,12 +604,11 @@ keys_to_sync(Keys) ->
 
 %% TODO: Add backpressure
 -spec(sync_key(Origin :: node(), KV :: kv()) -> ok).
-sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
+sync_key(Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   Payload = #{type => full_update, reason => aae, key => Key, map => Map, vclock => VClock},
   SendAfter = trunc(rand:uniform() * 10000),
   %% Maybe remove {only_nodes, [Origin]} from MCOpts
   %% to generate more random gossip
-  %% Think about adding: {only_nodes, [Origin]}
 
   %% So, it's likely that this update will go the 6 nodes near me.
   %% They can then AAE across the cluster.
@@ -536,7 +628,7 @@ sync_key(_Origin, _KV = #kv{vclock = VClock, key = Key, map = Map}) ->
   %% -Sargun Dhillon
   %% 2/9/2016
 
-  MCOpts = [{ttl, 1}, {fanout, 1}],
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
   timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts]),
   ok.
 
@@ -579,3 +671,157 @@ divergent_keys(LocalAAEData, RemoteAAEData) ->
 -spec(handle_metadata_snapshot(state()) -> state()).
 handle_metadata_snapshot(State = #state{metadata_snapshot_next = MSN}) ->
   State#state{metadata_snapshot_current = MSN, metadata_snapshot_next = aae_snapshot()}.
+
+handle_bloom_wakeup(_State = #state{bloom_filter = BloomFilter}) ->
+  Payload = #{type => bloom_filter, bloom_filter => BloomFilter},
+  MCOpts = [{ttl, 1}, {fanout, 1}],
+  SendAfter = 5000,
+  %% We delay the messages by 5 seconds
+  %% The purpose of this is to ensure that the key value has propagated through the system
+  %% and we don't double write
+  timer:apply_after(SendAfter, lashup_gm_mc, multicast, [?MODULE, Payload, MCOpts]),
+  ok.
+
+handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) when RemoteBloomFilter =:= LocalBloomFilter ->
+  State;
+%% If the remote bloom filter is tinier than ours, ignore it, it'll converge eventually
+handle_bloom_filter(#{payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) when size(RemoteBloomFilter) < size(LocalBloomFilter) ->
+  State;
+handle_bloom_filter(#{origin := Origin, payload := #{bloom_filter := RemoteBloomFilter}},
+    State = #state{bloom_filter = LocalBloomFilter}) ->
+  bloom_sync(Origin, RemoteBloomFilter),
+  case lashup_bloom:size(RemoteBloomFilter) > lashup_bloom:size(LocalBloomFilter) of
+    true ->
+      NewSize = lashup_bloom:size(RemoteBloomFilter),
+      LocalBloomFilter1 = build_bloom(NewSize),
+      State#state{bloom_filter = LocalBloomFilter1};
+    false ->
+      State
+  end.
+
+bloom_sync(Origin, RemoteBloomFilter) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  MissingKeys =
+    lists:foldl(
+      fun(Key, Acc) ->
+        case lashup_bloom:has_element(Key, RemoteBloomFilter) of
+          true ->
+            Acc;
+          false ->
+            [Key|Acc]
+        end
+      end,
+      [],
+      AllKeys),
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  lager:info("Repairing ~B keys via bloom_filter to node: ~p", [length(MissingKeys), Origin]),
+  lists:foreach(
+    fun(Key) ->
+      {_, #kv{key = Key, vclock = VClock, map = Map}} = op_getkv(Key),
+      Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
+      lashup_gm_mc:multicast(?MODULE, Payload, MCOpts)
+    end,
+    MissingKeys
+  ).
+
+%% This should rarely find missing keys, because the bloom filter should catch it.
+handle_key_aae_wakeup(State0) ->
+  lager:info("Performing Key AAE"),
+  TotalKeys = mnesia:table_info(kv, size),
+  {State1, BHC} = get_bucket_hash_cache(TotalKeys, State0),
+  Payload = #{type => bucket_hashes, bucket_hashes => BHC},
+  MCOpts = [{ttl, 1}, {fanout, 1}],
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  State1.
+
+get_bucket_hash_cache(TotalKeys, State0 = #state{bucket_hashes = BHC = #bucket_hash_cache{total_keys = TotalKeys}}) ->
+  {State0, BHC};
+get_bucket_hash_cache(_OldTotalKeys, State0) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  BHC = bucket_hashes(AllKeys),
+  State1 = State0#state{bucket_hashes = BHC},
+  {State1, BHC}.
+
+bucket_hashes(AllKeys) ->
+  TotalKeys = length(AllKeys),
+  BucketCount = trunc((TotalKeys + 1) / 100.0) + 1,
+  lager:debug("Bucket Count: ~p", [BucketCount]),
+  BHCEs =
+    [{BucketNum, build_cache_entry(AllKeys, BucketNum, BucketCount)}
+      || BucketNum <- lists:seq(0, BucketCount - 1)],
+
+  #bucket_hash_cache{buckets_cache = BHCEs, total_keys = TotalKeys}.
+
+build_cache_entry(AllKeys, BucketNum, BucketCount) ->
+  Keys0 = keys_by_bucket(BucketNum, BucketCount, AllKeys),
+  Keys1 = lists:usort(Keys0),
+  lager:debug("Hashing keys: ~p", [Keys1]),
+  #bucket_hash_cache_entry{hash = erlang:phash2(Keys1), total_keys = length(Keys1)}.
+
+
+%% Noop
+handle_bucket_hashes(#{payload := #{bucket_hashes := BucketHashes}}, State = #state{bucket_hashes = BucketHashes}) ->
+  lager:debug("Found equal hashes"),
+  State;
+handle_bucket_hashes(#{origin := Origin, payload := #{bucket_hashes := RemoteBH}}, State0) ->
+  TotalKeys = mnesia:table_info(kv, size),
+  {State1, LocalBHC} = get_bucket_hash_cache(TotalKeys, State0),
+  KeysToSend = sync_bucket_hashes(RemoteBH, LocalBHC),
+  lager:debug("Hash comparison mechanism should send ~B keys to ~p", [length(KeysToSend), Origin]),
+  lists:foreach(fun(Key) -> advertise_key(Origin, Key) end, KeysToSend),
+  State1.
+
+advertise_key(Origin, Key) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  Payload = #{type => do_you_have_key, reason => bucket_hashes, key => Key},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts).
+
+
+sync_bucket_hashes(#bucket_hash_cache{buckets_cache = RBuckets}, #bucket_hash_cache{buckets_cache = LBuckets})
+  when length(RBuckets) =/= length(LBuckets) ->
+  BucketCount = length(RBuckets),
+  AllKeys = mnesia:dirty_all_keys(kv),
+  BHCEs =
+    [{BucketNum, build_cache_entry(AllKeys, BucketNum, BucketCount)}
+      || BucketNum <- lists:seq(0, BucketCount - 1)],
+  sync_bucket_bucket_cache_entries(AllKeys, RBuckets, BHCEs);
+sync_bucket_hashes(#bucket_hash_cache{buckets_cache = RBuckets}, #bucket_hash_cache{buckets_cache = LBuckets}) ->
+  AllKeys = mnesia:dirty_all_keys(kv),
+  sync_bucket_bucket_cache_entries(AllKeys, RBuckets, LBuckets).
+
+sync_bucket_bucket_cache_entries(AllKeys, Remote, Local) ->
+  RemoteLength = length(Remote) ,
+  LocalLength = length(Local),
+  true = RemoteLength == LocalLength,
+  LocalBucketHashes = [{N, Hash} || {N, #bucket_hash_cache_entry{hash = Hash}} <- Local],
+  RemoteBucketHashes = [{N, Hash} || {N, #bucket_hash_cache_entry{hash = Hash}} <- Remote],
+  ZippedHashes = lists:zip(LocalBucketHashes, RemoteBucketHashes),
+  MismatchedBuckets = [N || {{N, LocalHash}, {N, RemoteHash}} <- ZippedHashes, LocalHash =/= RemoteHash],
+  lists:flatmap(fun(X) -> keys_by_bucket(X, LocalLength, AllKeys) end, MismatchedBuckets).
+
+keys_by_bucket(BucketNum, BucketCount, AllKeys) ->
+  lists:filter(fun(X) -> erlang:phash2(X, BucketCount) == BucketNum end, AllKeys).
+
+handle_do_you_have_key(#{origin := Origin, payload := #{key := Key}}, State) ->
+  case op_getkv(Key) of
+    {new, _} ->
+      request_kv(Origin, Key);
+    {existing, _} ->
+      ok
+  end,
+  State.
+
+request_kv(Origin, Key) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  Payload = #{type => request_kv, key => Key},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts).
+
+handle_request_kv(#{origin := Origin, payload := #{key := Key}}, State) ->
+  MCOpts = [{ttl, 1}, {fanout, 1}, {only_nodes, [Origin]}],
+  {_, #kv{key = Key, map = Map, vclock = VClock}} = op_getkv(Key),
+  Payload = #{type => full_update, reason => bloom_filter, key => Key, map => Map, vclock => VClock},
+  lashup_gm_mc:multicast(?MODULE, Payload, MCOpts),
+  State.
+
