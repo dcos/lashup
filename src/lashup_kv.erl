@@ -140,7 +140,7 @@ init([]) ->
   Elements = length(mnesia:dirty_all_keys(kv)),
   InitialSize = lashup_bloom:calculate_size(Elements, ?FALSE_P),
   Bloom = build_bloom(InitialSize),
-  rand:seed(exs1024),
+  rand:seed(exsplus),
   %% 1-2 minute jitter time for doing AAE, but the first 10 ticks are compressed
   lashup_timers:wakeup_loop(aae_wakeup,
     lashup_timers:wait(60000,

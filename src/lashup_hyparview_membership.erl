@@ -63,7 +63,7 @@
   active_view = ordsets:new() :: ordsets:ordset(),
   passive_view = ordsets:new() :: ordsets:ordset(),
   monitors = [] :: [monitor()],
-  fixed_seed,
+  fixed_seed :: rand:state(),
   idx = 1 :: pos_integer(),
   unfilled_active_set_count = 0, %% Number of times I've tried to neighbor and I've not seen an active set
   init_time = erlang:error(init_time_unset) :: integer(),
@@ -149,11 +149,9 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  random:seed(erlang:phash2([node()]),
-    erlang:monotonic_time(),
-    erlang:unique_integer()),
+  rand:seed(exsplus),
   %% This seed is a fixed seed used for shuffling the list
-  FixedSeed = seed(),
+  FixedSeed = lashup_utils:seed(),
   MyPid = self(),
   spawn_link(fun() -> shuffle_backoff_loop(5000, MyPid) end),
   %% Try to get in touch with contact node(s)
@@ -374,7 +372,7 @@ handle_message_cast(UnknownMessage, State) ->
 reschedule_ping() ->
   reschedule_ping(100).
 reschedule_ping(Time) ->
-  RandFloat = random:uniform(),
+  RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
   timer:send_after(Delay, ping_rq).
@@ -382,7 +380,7 @@ reschedule_ping(Time) ->
 reschedule_maybe_neighbor() ->
   reschedule_maybe_neighbor(?NEIGHBOR_INTERVAL).
 reschedule_maybe_neighbor(Time) ->
-  RandFloat = random:uniform(),
+  RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
   timer:send_after(Delay, maybe_neighbor).
@@ -390,7 +388,7 @@ reschedule_maybe_neighbor(Time) ->
 reschedule_join() ->
   reschedule_join(?JOIN_INTERVAL).
 reschedule_join(BaseTime) ->
-  RandFloat = random:uniform(),
+  RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
   timer:send_after(Multipler * BaseTime, try_join).
 
@@ -399,7 +397,7 @@ reschedule_join(BaseTime) ->
 
 choose_node(Nodes) when length(Nodes) > 0 ->
   Length = erlang:length(Nodes),
-  NodeIdx = random:uniform(Length),
+  NodeIdx = rand:uniform(Length),
   lists:nth(NodeIdx, Nodes).
 
 %% JOIN CODE
@@ -450,7 +448,7 @@ trim_ordset_to(Ordset, Size) when Size > 0 ->
   trim_ordset_to(Ordset, Size, []).
 
 trim_ordset_to(Ordset, Size, DroppedItems) when length(Ordset) > Size ->
-  Idx = random:uniform(length(Ordset)),
+  Idx = rand:uniform(length(Ordset)),
   ItemToRemove = lists:nth(Idx, Ordset),
   Ordset1 = ordsets:del_element(ItemToRemove, Ordset),
   DroppedItems1 = ordsets:add_element(ItemToRemove, DroppedItems),
@@ -624,7 +622,7 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}
   end.
 
 forward_forward_join1(ForwardJoin, Nodes) when is_list(Nodes) ->
-  Idx = random:uniform(length(Nodes)),
+  Idx = rand:uniform(length(Nodes)),
   TargetNode = lists:nth(Idx, Nodes),
   gen_server:cast({?SERVER, TargetNode}, ForwardJoin).
 
@@ -719,7 +717,7 @@ maybe_gm_neighbor(_Timeout, _State) ->
   ok.
 
 send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(PassiveView) > 0 ->
-  ShuffledPassiveView = shuffle_list(PassiveView, FixedSeed),
+  ShuffledPassiveView = lashup_utils:shuffle_list(PassiveView, FixedSeed),
   RealIdx = Idx rem length(ShuffledPassiveView) + 1,
   Node = lists:nth(RealIdx, ShuffledPassiveView),
   send_neighbor_to(Timeout, Node, Priority),
@@ -981,27 +979,11 @@ monitor_ref_to_node(Node, Monitors) ->
 has_monitor(Node, Monitors) ->
   lists:keymember(Node, #monitor.node, Monitors).
 
-shuffle_list(List, FixedSeed) ->
-  {_, PrefixedList} =
-    lists:foldl(fun(X, {SeedState, Acc}) ->
-      {N, SeedState1} = random:uniform_s(1000000, SeedState),
-      {SeedState1, [{N, X} | Acc]}
-                end,
-      {FixedSeed, []},
-      List),
-  PrefixedListSorted = lists:sort(PrefixedList),
-  [Value || {_N, Value} <- PrefixedListSorted].
-
 
 -spec(push_state(state()) -> ok).
 push_state(#state{passive_view = PV, active_view = AV}) ->
   gen_event:sync_notify(lashup_hyparview_events, #{type => view_update, active_view => AV, passive_view => PV}),
   ok.
-
-seed() ->
-  {erlang:phash2([node()]),
-    erlang:monotonic_time(),
-    erlang:unique_integer()}.
 
 shuffle_backoff_loop(Delay, Pid) ->
   timer:sleep(Delay),
@@ -1057,7 +1039,7 @@ schedule_disconnect(Node) ->
   schedule_disconnect(Node, 25000),
   schedule_disconnect(Node, 50000).
 schedule_disconnect(Node, Time) ->
-  RandFloat = random:uniform(),
+  RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
   timer:send_after(Delay, {maybe_disconnect, Node}).

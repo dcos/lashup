@@ -67,7 +67,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  rand:seed(exs1024),
+  rand:seed(exsplus),
   State = #state{},
   schedule_next_probe(),
   {ok, State}.
@@ -169,7 +169,7 @@ schedule_next_probe() ->
 %% We should make this configurable. It's the decision of when to make the first ping
 -spec(schedule_next_probe(Time :: non_neg_integer()) -> ok).
 schedule_next_probe(Time) when is_integer(Time) ->
-  RandFloat = random:uniform(),
+  RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
   Delay = Multipler * Time,
   timer:send_after(Delay, do_probe),
