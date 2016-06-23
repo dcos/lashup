@@ -200,7 +200,7 @@ kill_nodes(_, 0) ->
   ok;
 kill_nodes(Config, Remaining) ->
   AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
-  Idx = random:uniform(length(AllNodes)),
+  Idx = rand:uniform(length(AllNodes)),
   Node = lists:nth(Idx, AllNodes),
   ct:pal("Killing node: ~p", [Node]),
   RemotePid = rpc:call(Node, erlang, whereis, [lashup_hyparview_membership]),
@@ -230,7 +230,7 @@ stop_start_nodes(_, 0) ->
   ok;
 stop_start_nodes(Config, Remaining) ->
   AllNodes = ?config(slaves, Config) ++ ?config(masters, Config),
-  KillIdx = random:uniform(length(AllNodes)),
+  KillIdx = rand:uniform(length(AllNodes)),
   KillNode = lists:nth(KillIdx, AllNodes),
   RestNodes = lists:delete(KillNode, AllNodes),
   KillNodePid = rpc:call(KillNode, os, getpid, []),
@@ -249,7 +249,7 @@ stop_start_nodes(Config, Remaining) ->
 
 
 wait_for_unreachability(KillNode, RestNodes, Now) ->
-  Idx = random:uniform(length(RestNodes)),
+  Idx = rand:uniform(length(RestNodes)),
   Node = lists:nth(Idx, RestNodes),
   Now2 = erlang:monotonic_time(),
   case erlang:convert_time_unit(Now2 - Now, native, seconds) of
@@ -388,7 +388,7 @@ choose_nodes(Nodes, Count) ->
 choose_nodes(_, 0, Acc) ->
   Acc;
 choose_nodes(Nodes, Count, Acc) ->
-  Idx = random:uniform(length(Nodes)),
+  Idx = rand:uniform(length(Nodes)),
   Node = lists:nth(Idx, Nodes),
   Nodes1 = lists:delete(Node, Nodes),
   choose_nodes(Nodes1, Count - 1, [Node | Acc]).

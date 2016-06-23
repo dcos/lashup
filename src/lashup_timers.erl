@@ -135,7 +135,7 @@ jitter_uniform(Factor, TimerResolver) when Factor >= 0 ->
   fun(Count) ->
     case Count of
       1 ->
-        rand:seed(exs1024);
+        rand:seed(exsplus);
       _ ->
         ok
     end,

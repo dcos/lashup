@@ -24,20 +24,18 @@
 
 -export_type([window/0]).
 
--spec(seed() -> random:ran()).
+-spec(seed() -> rand:state()).
 seed() ->
-  {erlang:phash2([node()]),
-  erlang:monotonic_time(),
-  erlang:unique_integer()}.
+  rand:seed(exsplus).
 
--spec shuffle_list(List, Seed :: random:ran()) -> List1 when
+-spec shuffle_list(List, Seed :: rand:state()) -> List1 when
   List :: [T, ...],
   List1 :: [T, ...],
   T :: term().
 shuffle_list(List, FixedSeed) ->
   {_, PrefixedList} =
     lists:foldl(fun(X, {SeedState, Acc}) ->
-      {N, SeedState1} = random:uniform_s(1000000, SeedState),
+      {N, SeedState1} = rand:uniform_s(1000000, SeedState),
       {SeedState1, [{N, X} | Acc]}
                 end,
       {FixedSeed, []},
@@ -126,7 +124,7 @@ try_connect_ip_port_to_nodename(Socket, Acc) ->
   %% The 3rd field, flags
   %% is set statically
   %% it doesn't matter too much
-  Random = random:uniform(100000000),
+  Random = rand:uniform(100000000),
   Nodename = iolist_to_binary(io_lib:format("r-~p@254.253.252.251", [Random])),
   NameAsk = <<"n", 00, 05, 16#37ffd:32, Nodename/binary>>,
   case gen_tcp:send(Socket, NameAsk) of

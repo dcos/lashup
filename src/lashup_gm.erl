@@ -118,8 +118,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
-  rand:seed(exs1024),
-  random:seed(lashup_utils:seed()),
+  rand:seed(exsplus),
   %% TODO: Add jitter
   MyPid = self(),
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
@@ -421,9 +420,7 @@ store_and_forward_updated_node(Member, From,
   }, State)  ->
   update_local_member(Value, Member, State),
   NewUpdatedNode = UpdatedNode#{exempt_nodes => [From]},
-  forward(NewUpdatedNode, State);
-store_and_forward_updated_node(_Member, _From, _UpdatedNode, _State) ->
-  ok.
+  forward(NewUpdatedNode, State).
 
 
 %% @doc update a local member, and persist it to ets, from a Value
