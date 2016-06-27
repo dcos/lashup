@@ -422,14 +422,30 @@ do_join(State) ->
       try_connect_then_join(Node)
   end.
 
+%% TODO(Sargun): Make asynchronous
 -spec(try_connect_then_join(node()) -> ok | {error, Reason :: term()}).
 try_connect_then_join(Node) ->
-  case net_adm:ping(Node) of
+  Timeout = lashup_config:join_timeout(),
+  case ping_with_timeout(Node, Timeout) of
     pong ->
       join(Node);
     _ ->
       {error, could_not_connect}
   end.
+
+-spec(ping_with_timeout(Node :: node(), Timeout:: non_neg_integer()) -> ok | timeout | pong | pang).
+ping_with_timeout(Node, Timeout) ->
+  Ref = make_ref(),
+  Self = self(),
+  spawn_link(fun() -> Self ! {Ref, net_adm:ping(Node)} end),
+  receive
+    {Ref, Response} ->
+      Response
+  after Timeout ->
+    timeout
+  end.
+
+
 
 -spec(join(node()) -> ok).
 join(Node) ->
