@@ -61,22 +61,12 @@ remote_subscribe(Node, Topics) ->
   EventMgrRef = event_mgr_ref(Node),
   case gen_event:add_sup_handler(EventMgrRef, ?MODULE, State) of
     ok ->
-      wait_for_setup(Reference);
+      {ok, Reference};
     {'EXIT', Term} ->
       {'EXIT', Term};
     Error ->
       {error, Error}
   end.
-
-wait_for_setup(Ref) ->
-  receive
-    {setup, Ref, RemotePid} ->
-      link(RemotePid), %% It turns out if the event manager dies in certain cases, the handlers unlink
-      {ok, Ref}
-  after 5000 -> %% Something bad has happened
-    {error, timeout}
-  end.
-
 
 event_mgr_ref(Node) when Node == node() ->
   ?SERVER;
@@ -110,8 +100,7 @@ start_link() ->
   {ok, State :: state()} |
   {ok, State :: state(), hibernate} |
   {error, Reason :: term()}).
-init(State = #state{pid = Pid, reference = Ref}) ->
-  Pid ! {setup, Ref, self()},
+init(State) ->
   {ok, State}.
 
 %%--------------------------------------------------------------------
