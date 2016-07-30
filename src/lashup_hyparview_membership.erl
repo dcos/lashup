@@ -422,18 +422,20 @@ do_join(State) ->
       try_connect_then_join(Node)
   end.
 
-%% TODO(Sargun): Make asynchronous
 -spec(try_connect_then_join(node()) -> ok | {error, Reason :: term()}).
 try_connect_then_join(Node) ->
   Timeout = lashup_config:join_timeout(),
   case ping_with_timeout(Node, Timeout) of
     pong ->
       join(Node);
+    %% This is the timeout case
+    maybe_pong ->
+      join(Node);
     _ ->
       {error, could_not_connect}
   end.
 
--spec(ping_with_timeout(Node :: node(), Timeout:: non_neg_integer()) -> ok | timeout | pong | pang).
+-spec(ping_with_timeout(Node :: node(), Timeout:: non_neg_integer()) -> ok | maybe_pong | pong | pang).
 ping_with_timeout(Node, Timeout) ->
   Ref = make_ref(),
   Self = self(),
@@ -442,7 +444,7 @@ ping_with_timeout(Node, Timeout) ->
     {Ref, Response} ->
       Response
   after Timeout ->
-    timeout
+    maybe_pong
   end.
 
 
@@ -998,7 +1000,7 @@ has_monitor(Node, Monitors) ->
 
 -spec(push_state(state()) -> ok).
 push_state(#state{passive_view = PV, active_view = AV}) ->
-  gen_event:sync_notify(lashup_hyparview_events, #{type => view_update, active_view => AV, passive_view => PV}),
+  lashup_hyparview_events:ingest(AV, PV),
   ok.
 
 shuffle_backoff_loop(Delay, Pid) ->

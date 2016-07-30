@@ -46,7 +46,8 @@
   subscriptions = [],
   epoch = erlang:error() :: non_neg_integer(),
   active_view = [],
-  subscribers = []
+  subscribers = [],
+  hyparview_event_ref :: reference()
 }).
 
 -type state() :: #state{}.
@@ -123,9 +124,8 @@ init([]) ->
   MyPid = self(),
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
   ets:new(members, [ordered_set, named_table, {keypos, #member.node}, compressed]),
-  lashup_hyparview_events:subscribe(
-    fun(Event) -> gen_server:cast(?SERVER, #{message => lashup_hyparview_event, event => Event}) end),
-  State = #state{epoch = new_epoch()},
+  {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
+  State = #state{epoch = new_epoch(), hyparview_event_ref = HyparviewEventsRef},
   init_node(State),
   timer:send_interval(3600 * 1000, trim_nodes),
   {ok, State}.
@@ -183,11 +183,6 @@ handle_cast(#{message := remote_event, from := From, event := #{message := updat
   %lager:debug("Received Updated Node: ~p", [UpdatedNode]),
   State1 = handle_updated_node(From, UpdatedNode, State),
   {noreply, State1};
-
-handle_cast(#{message := lashup_hyparview_event, event := #{type := current_views} = Event}, State) ->
-  State1 = handle_current_views(Event, State),
-  {noreply, State1};
-
 handle_cast(update_node, State) ->
   State1 = update_node(State),
   {noreply, State1};
@@ -215,7 +210,10 @@ handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_
   State1 = prune_subscribers(MonitorRef, State),
   State2 = prune_subscriptions(MonitorRef, State1),
   {noreply, State2};
-
+handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, active_view := ActiveView}},
+  State0 = #state{hyparview_event_ref = EventRef}) ->
+  State1 = handle_current_views(ActiveView, State0),
+  {noreply, State1};
 handle_info({nodedown, Node}, State) ->
   State1 = handle_nodedown(Node, State),
   {noreply, State1};
@@ -291,16 +289,16 @@ handle_subscribe(Pid, State = #state{subscribers = Subscribers}) ->
   State1 = State#state{subscribers = [Subscriber | Subscribers]},
   {{ok, self()}, State1}.
 
-handle_current_views(_Event = #{active_view := RemoteActiveView}, State = #state{subscriptions = Subscriptions}) ->
-  Subscriptions1 = lists:foldl(fun check_member/2, Subscriptions, RemoteActiveView),
+handle_current_views(ActiveView, State = #state{subscriptions = Subscriptions}) ->
+  Subscriptions1 = lists:foldl(fun check_member/2, Subscriptions, ActiveView),
   OldActiveView = State#state.active_view,
-  case {RemoteActiveView, Subscriptions} of
+  case {ActiveView, Subscriptions} of
     {OldActiveView, Subscriptions1} ->
       ok;
     _ ->
       gen_server:cast(self(), update_node)
   end,
-  State#state{subscriptions = Subscriptions1, active_view = RemoteActiveView}.
+  State#state{subscriptions = Subscriptions1, active_view = ActiveView}.
 
 
 check_member(Node, Subscriptions) ->

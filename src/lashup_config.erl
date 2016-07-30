@@ -50,6 +50,7 @@ prwl() ->
   application:get_env(lashup, prwl, 5).
 
 %% How long to wait for net_adm:ping when doing initial join
+%% After this it becomes async
 -spec(join_timeout() -> non_neg_integer()).
 join_timeout() ->
   application:get_env(lashup, join_timeout, 250).
