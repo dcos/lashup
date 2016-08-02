@@ -200,6 +200,9 @@ handle_call({op, Key, VClock, Op}, _From, State) ->
 handle_call({op, Key, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
+handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
+  Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
+  {reply, Result, State};
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
 
@@ -214,6 +217,10 @@ handle_call(_Request, _From, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+%% A maybe update from the sync FSM
+handle_cast({maybe_update, Key, VClock, Map}, State0) ->
+  State1 = handle_full_update(#{key => Key, vclock => VClock, map => Map}, State0),
+  {noreply, State1};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
