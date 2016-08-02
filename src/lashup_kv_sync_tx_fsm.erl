@@ -77,6 +77,8 @@ terminate(Reason, State, _Data) ->
     lager:warning("KV AAE terminated (~p): ~p", [State, Reason]).
 
 finish_sync(#state{remote_pid = RemotePID}) ->
+    %% This is to ensure that all messages have flushed
+    timer:sleep(100),
     Message = #{from => self(), message => done},
     erlang:send(RemotePID, Message, [noconnect]).
 
@@ -88,10 +90,11 @@ share_key(Key, _StateData = #state{remote_pid = RemotePID}) ->
 send_key(Key, RemotePID) ->
     [#kv{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(kv, Key),
     Message = #{from => self(), key => Key, vclock => VClock, map => Map, message => kv},
-    timer:apply_after(10, erlang, send, [RemotePID, Message, [noconnect]]).
+    erlang:send(RemotePID, Message, [noconnect]).
 
 defer_sync_key(Key) ->
-    timer:apply_after(10, gen_statem, cast, [self(), {sync, Key}]).
+    Sleep = trunc((rand:uniform() + 0.5) * 10),
+    timer:apply_after(Sleep, gen_statem, cast, [self(), {sync, Key}]).
 
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
     {stop, normal};

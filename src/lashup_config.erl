@@ -94,7 +94,7 @@ max_mc_replication() ->
 %% @doc
 %% How often we message our Vector Clocks for AAE in milliseconds
 aae_interval() ->
-  application:get_env(lashup, aae_interval, 300000).
+  application:get_env(lashup, aae_interval, 60000).
 
 %% @doc
 %% Lashup working directory
