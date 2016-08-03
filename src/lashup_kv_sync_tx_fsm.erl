@@ -71,7 +71,7 @@ idle(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{moni
     handle_disconnect(Disconnect).
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
-    {handle_event_function, OldState, OldData}.
+    {state_functions, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
     lager:warning("KV AAE terminated (~p): ~p", [State, Reason]).
