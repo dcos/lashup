@@ -37,7 +37,7 @@
 
 %% The original C was 1
 %% I think for our use-case, we can bump it to 3?
--define(C, 1).
+-define(C, 3).
 % This number is actually log10(10000)
 -define(LOG_TOTAL_MEMBERS, 4).
 
@@ -417,9 +417,8 @@ do_join(State) ->
   case ContactNodes of
     [] ->
       {error, no_contact_nodes};
-    _ ->
-      Node = choose_node(ContactNodes),
-      try_connect_then_join(Node)
+    [FirstNode|_] ->
+      try_connect_then_join(FirstNode)
   end.
 
 -spec(try_connect_then_join(node()) -> ok | {error, Reason :: term()}).
