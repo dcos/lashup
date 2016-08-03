@@ -16,8 +16,7 @@
   match_spec :: ets:match_spec(),
   match_spec_comp :: ets:comp_match_spec(),
   pid :: pid(),
-  ref :: reference(),
-  vclocks = orddict:new() :: orddict:orddict()
+  ref :: reference()
 }).
 
 -include("lashup_kv.hrl").
@@ -52,33 +51,10 @@ loop(State) ->
 maybe_process_event(NewRecord = #kv{key = Key}, OldRecords, State = #state{match_spec_comp = MatchSpec}) ->
   case ets:match_spec_run([{Key}], MatchSpec) of
     [true] ->
-      maybe_process_event2(NewRecord, OldRecords, State);
+      send_event(NewRecord, OldRecords, State);
     [] ->
       State
   end.
-
-maybe_process_event2(NewRecord = #kv{key = Key}, OldRecords, State = #state{vclocks = VClocks}) ->
-  case orddict:find(Key, VClocks) of
-    error ->
-      send_event(NewRecord, OldRecords, State),
-      #kv{vclock = ForeignVClock} = NewRecord,
-      update_state(Key, ForeignVClock, State);
-    {ok, VClock} ->
-      maybe_process_event3(NewRecord, OldRecords, VClock, State)
-  end.
-
-maybe_process_event3(NewRecord = #kv{vclock = ForeignVClock, key = Key}, OldRecords, LocalVClock, State) ->
-  case riak_dt_vclock:dominates(LocalVClock, ForeignVClock) of
-    true ->
-      State;
-    false ->
-      send_event(NewRecord, OldRecords, State),
-      update_state(Key, ForeignVClock, State)
-  end.
-
-update_state(Key, VClock, State = #state{vclocks = VClocks}) ->
-  VClocks1 = orddict:store(Key, VClock, VClocks),
-  State#state{vclocks = VClocks1}.
 
 %% Rewrite the ref and send the event
 send_event(_NewRecord = #kv{key = Key, map = Map}, [], #state{ref = Ref, pid = Pid}) ->
@@ -97,11 +73,10 @@ dump_events(State = #state{match_spec = MatchSpec}) ->
   Records = mnesia:dirty_select(kv, RewrittenMatchspec),
 
   dump_events(Records, State),
-  VClocks = ordsets:from_list([{Key, VClock} || #kv{key = Key, vclock = VClock} <- Records]),
-  State#state{vclocks = VClocks}.
+  State.
 
 dump_events(Records, State) ->
-  [send_event(Record, [], State) || Record <- Records].
+  lists:foreach(fun(Record) -> send_event(Record, [], State) end, Records).
 
 
 rewrite_matchspec(MatchSpec) ->
