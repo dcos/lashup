@@ -22,7 +22,8 @@
   work_dir/0,
   bloom_interval/0,
   key_aae_interval/0,
-  join_timeout/0
+  join_timeout/0,
+  naive_prefixes/0
 ]).
 
 %% @doc
@@ -115,3 +116,7 @@ bloom_interval() ->
 %% How often we message our bloom filter for AAE in milliseconds
 key_aae_interval() ->
   application:get_env(lashup, key_aae_interval, 600000).
+
+-spec(naive_prefixes() -> [string()]).
+naive_prefixes() ->
+  application:get_env(lashup, naive_prefixes, ["minuteman", "navstar"]).

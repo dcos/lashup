@@ -92,72 +92,13 @@ compare_vclocks(V1, V2) ->
 -spec(maybe_poll_for_master_nodes() -> [node()]).
 maybe_poll_for_master_nodes() ->
   IPs = inet_res:lookup("master.mesos", in, a, [], 1000),
-  Nodes = [erlang_nodes(IP) || IP <- IPs],
-  NaiveNodes = [lists:flatten(io_lib:format("minuteman@~s", [inet:ntoa(IP)])) || IP <- IPs],
-  NaiveNodesAtoms = [list_to_atom(X) || X <- NaiveNodes],
-  FlattenedNodes = lists:flatten(Nodes) ++ NaiveNodesAtoms,
-  FlattenedNodesSet = ordsets:from_list(FlattenedNodes),
-  FlattenedNodesSet.
+  NaivePrefixes = lashup_config:naive_prefixes(),
+  NaiveNodes = [lists:flatten(io_lib:format("~s@~s", [Prefix, inet:ntoa(IP)]))
+    || IP <- IPs, Prefix <- NaivePrefixes],
 
-
--spec(erlang_nodes(IP :: inet:ip4_address()) -> [node()]).
-erlang_nodes(IP) ->
-  case net_adm:names(IP) of
-    {error, _} ->
-      [];
-    {ok, NamePorts} ->
-      IPPorts = [{IP, Port} || {_Name, Port} <- NamePorts],
-      lists:foldl(fun ip_port_to_nodename/2, [], IPPorts)
-  end.
-
-%% Borrowed the bootstrap of the disterl protocol :)
-
-ip_port_to_nodename({IP, Port}, Acc) ->
-  case gen_tcp:connect(IP, Port, [binary, {packet, 2}, {active, false}], 500) of
-    {error, _Reason} ->
-      Acc;
-    {ok, Socket} ->
-      try_connect_ip_port_to_nodename(Socket, Acc)
-  end.
-
-try_connect_ip_port_to_nodename(Socket, Acc) ->
-  %% The 3rd field, flags
-  %% is set statically
-  %% it doesn't matter too much
-  Random = rand:uniform(100000000),
-  Nodename = iolist_to_binary(io_lib:format("r-~p@254.253.252.251", [Random])),
-  NameAsk = <<"n", 00, 05, 16#37ffd:32, Nodename/binary>>,
-  case gen_tcp:send(Socket, NameAsk) of
-    ok ->
-      Acc2 = wait_for_status(Socket, Acc),
-      gen_tcp:close(Socket),
-      Acc2;
-    _ ->
-      gen_tcp:close(Socket),
-      Acc
-  end.
-
-wait_for_status(Socket, Acc) ->
-  case gen_tcp:recv(Socket, 0, 1000) of
-    {ok, <<"sok">>} ->
-      Status = <<"sok">>,
-      case gen_tcp:send(Socket, Status) of
-        ok ->
-          wait_for_name(Socket, Acc);
-        _ ->
-          Acc
-      end;
-    _ ->
-      Acc
-  end.
-
-wait_for_name(Socket, Acc) ->
-  case gen_tcp:recv(Socket, 0, 1000) of
-    {ok, <<"n", _Version:16, _Flags:32, _Handshake:32, Nodename/binary>>} ->
-      [binary_to_atom(Nodename, latin1)|Acc];
-    _ ->
-      Acc
-  end.
+  NaiveNodesAtoms0 = [list_to_atom(X) || X <- NaiveNodes],
+  NaiveNodesAtoms1 = NaiveNodesAtoms0 -- [node()],
+  ordsets:from_list(NaiveNodesAtoms1).
 
 
 -spec(subtract(List1, List2) -> Set when
