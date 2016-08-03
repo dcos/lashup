@@ -13,8 +13,7 @@
 
 %% API
 -export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
-  erlang_nodes/1, maybe_poll_for_master_nodes/0, subtract/2,
-  shuffle_list/1, replace_file/2, read_file/1]).
+  maybe_poll_for_master_nodes/0, subtract/2, shuffle_list/1, replace_file/2, read_file/1]).
 
 -record(window, {
   samples = [] :: list(integer()),
