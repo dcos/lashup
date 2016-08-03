@@ -68,10 +68,10 @@ maybe_process_event2(NewRecord = #kv{key = Key}, OldRecords, State = #state{vclo
   end.
 
 maybe_process_event3(NewRecord = #kv{vclock = ForeignVClock, key = Key}, OldRecords, LocalVClock, State) ->
-  case riak_dt_vclock:dominates(ForeignVClock, LocalVClock) of
-    false ->
-      State;
+  case riak_dt_vclock:dominates(LocalVClock, ForeignVClock) of
     true ->
+      State;
+    false ->
       send_event(NewRecord, OldRecords, State),
       update_state(Key, ForeignVClock, State)
   end.
