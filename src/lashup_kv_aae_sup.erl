@@ -35,7 +35,7 @@ start_aae(Node) ->
         type => worker,
         modules => [lashup_kv_sync_tx_fsm]
     },
-    start_child(ChildSpec).
+    supervisor:start_child(?MODULE, ChildSpec).
 
 
 
@@ -48,13 +48,7 @@ receive_aae(Node, RemotePid) ->
         type => worker,
         modules => [lashup_kv_sync_fsm]
     },
-    start_child(ChildSpec).
-
-start_child(ChildSpec) ->
-    case supervisor:start_child(?MODULE, ChildSpec) of
-        {ok, Pid} ->
-            {ok, Pid}
-    end.
+    supervisor:start_child(?MODULE, ChildSpec).
 
 
 %% ===================================================================

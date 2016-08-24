@@ -155,7 +155,4 @@ refresh() ->
     AllChildren = supervisor:which_children(lashup_kv_aae_sup),
     TxChildren = [Id || {{tx, Id}, _Child, _Type, _Modules} <- AllChildren],
     ChildrenToStart = ActiveView -- TxChildren,
-    lists:foreach(fun start_aae/1, ChildrenToStart).
-
-start_aae(RemoteNode) ->
-    lashup_kv_aae_sup:start_aae(RemoteNode).
+    lists:foreach(fun lashup_kv_aae_sup:start_aae/1, ChildrenToStart).
