@@ -52,14 +52,18 @@ ingest(Member) ->
   ok.
 
 %% @doc
-%% Subscribes a process to zero or more topics
-%% Processes then get messages like:
-%% {{@module}, #{ref => Reference, payload => Payload}}
+%% Equivalent to {@link {@module}:remote_subscribe/1} with `Node' set to `node()'
 %% @end
 -spec(subscribe() -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
 subscribe() ->
   remote_subscribe(node()).
 
+%% @doc
+%% Subscribes calling process to zero or more topics produced by Node.
+%%
+%% Processes then get messages like:
+%% `{{@module}, #{ref => Reference, payload => Payload}}'
+%% @end
 -spec(remote_subscribe(Node :: node()) ->
   {ok, reference()} | {'EXIT', term()} | {error, term()}).
 remote_subscribe(Node) ->

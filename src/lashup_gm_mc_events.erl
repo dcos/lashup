@@ -44,14 +44,18 @@ ingest(MulticastPacket) ->
   ok.
 
 %% @doc
-%% Subscribes a process to zero or more topics
-%% Processes then get messages like:
-%% {lashup_gm_mc_event, #{ref => Reference, payload => Payload}}
+%% Equivalent to {@link {@module}:remote_subscribe/2} with `Node' set to `node()'
 %% @end
 -spec(subscribe([lashup_gm_mc:topic()]) -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
 subscribe(Topics) ->
   remote_subscribe(node(), Topics).
 
+%% @doc
+%% Subscribes calling process to zero or more topics produced by Node.
+%%
+%% Processes then get messages like:
+%% `{{@module}, #{ref => Reference, payload => Payload}}'
+%% @end
 -spec(remote_subscribe(Node :: node(), [lashup_gm_mc:topic()]) ->
   {ok, reference()} | {'EXIT', term()} | {error, term()}).
 remote_subscribe(Node, Topics) ->
