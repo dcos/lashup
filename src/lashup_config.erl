@@ -22,7 +22,8 @@
   work_dir/0,
   bloom_interval/0,
   key_aae_interval/0,
-  join_timeout/0
+  join_timeout/0,
+  naive_prefixes/0
 ]).
 
 %% @doc
@@ -50,6 +51,7 @@ prwl() ->
   application:get_env(lashup, prwl, 5).
 
 %% How long to wait for net_adm:ping when doing initial join
+%% After this it becomes async
 -spec(join_timeout() -> non_neg_integer()).
 join_timeout() ->
   application:get_env(lashup, join_timeout, 250).
@@ -88,12 +90,12 @@ min_departition_probe_interval() ->
 %% @end
 -spec(max_mc_replication() -> pos_integer()).
 max_mc_replication() ->
-  application:get_env(lashup, max_mc_replication, 1).
+  application:get_env(lashup, max_mc_replication, 2).
 
 %% @doc
 %% How often we message our Vector Clocks for AAE in milliseconds
 aae_interval() ->
-  application:get_env(lashup, aae_interval, 300000).
+  application:get_env(lashup, aae_interval, 60000).
 
 %% @doc
 %% Lashup working directory
@@ -114,3 +116,7 @@ bloom_interval() ->
 %% How often we message our bloom filter for AAE in milliseconds
 key_aae_interval() ->
   application:get_env(lashup, key_aae_interval, 600000).
+
+-spec(naive_prefixes() -> [string()]).
+naive_prefixes() ->
+  application:get_env(lashup, naive_prefixes, ["minuteman", "navstar"]).

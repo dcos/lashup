@@ -13,9 +13,9 @@
 
 %% API
 -export([start_link/0,
-  subscribe/1,
   subscribe/0,
-  subscribe/2]).
+  remote_subscribe/1,
+  ingest/2]).
 
 %% gen_event callbacks
 -export([init/1,
@@ -27,7 +27,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {callback, active_view = ordsets:new(), passive_view = ordsets:new(), monitor_ref = undefined}).
+-record(state, {pid, reference, active_view = ordsets:new(), passive_view = ordsets:new()}).
 
 %%%===================================================================
 %%% gen_event callbacks
@@ -43,25 +43,33 @@
 start_link() ->
   gen_event:start_link({local, ?SERVER}).
 
+-spec(subscribe() -> {ok, reference()} | {'EXIT', term()} | {error, term()}).
 subscribe() ->
-  subscribe(self()).
-subscribe(Pid) when is_pid(Pid) ->
-  Fun =
-    fun(Event) ->
-      Pid ! {lashup_hyparview_event, Event}
-    end,
-  subscribe(Fun);
-subscribe(Fun) when is_function(Fun, 1) ->
-  gen_event:add_sup_handler(?SERVER, ?MODULE, [Fun]).
+  remote_subscribe(node()).
 
-subscribe(Id, Pid) when is_pid(Pid) ->
-  Fun =
-    fun(Event) ->
-      Pid ! {lashup_hyparview_event, Event}
-    end,
-  subscribe(Id, Fun);
-subscribe(Id, Fun) when is_function(Fun, 1) ->
-  gen_event:add_sup_handler(?SERVER, {?MODULE, Id}, [Fun]).
+ingest(ActiveView, PassiveView) ->
+  gen_event:notify(?SERVER, {ingest, ActiveView, PassiveView}),
+  ok.
+
+-spec(remote_subscribe(Node :: node()) ->
+  {ok, reference()} | {'EXIT', term()} | {error, term()}).
+remote_subscribe(Node) ->
+  Reference = make_ref(),
+  State = #state{pid = self(), reference = Reference},
+  EventMgrRef = event_mgr_ref(Node),
+  case gen_event:add_sup_handler(EventMgrRef, ?MODULE, State) of
+    ok ->
+      {ok, Reference};
+    {'EXIT', Term} ->
+      {'EXIT', Term};
+    Error ->
+      {error, Error}
+  end.
+
+event_mgr_ref(Node) when Node == node() ->
+  ?SERVER;
+event_mgr_ref(Node) ->
+  {?SERVER, Node}.
 
 
 %%%===================================================================
@@ -80,14 +88,12 @@ subscribe(Id, Fun) when is_function(Fun, 1) ->
   {ok, State :: #state{}} |
   {ok, State :: #state{}, hibernate} |
   {error, Reason :: term()}).
-init([Fun]) ->
+init(State0) ->
   ActiveView = lashup_hyparview_membership:get_active_view(),
   PassiveView = lashup_hyparview_membership:get_passive_view(),
-  State1 = #state{callback = Fun},
-  State2 = maybe_restore_monitor_ref(State1),
-  State3 = State2#state{passive_view = PassiveView, active_view = ActiveView},
-  advertise(State2, State3),
-  {ok, State3}.
+  State1 = State0#state{passive_view = PassiveView, active_view = ActiveView},
+  advertise(State1, [], [], ActiveView, PassiveView),
+  {ok, State1}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -104,11 +110,11 @@ init([Fun]) ->
   {swap_handler, Args1 :: term(), NewState :: #state{},
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   remove_handler).
-handle_event(#{type := view_update, active_view := Active, passive_view := Passive}, State) ->
-  State1 = maybe_restore_monitor_ref(State),
-  State2 = State1#state{active_view = Active, passive_view = Passive},
-  advertise(State, State2),
-  {ok, State2}.
+handle_event({ingest, ActiveView1, PassiveView1},
+    State0 = #state{active_view = ActiveView0, passive_view = PassiveView0}) ->
+  State1 = State0#state{active_view = ActiveView1, passive_view = PassiveView1},
+  advertise(State1, ActiveView0, PassiveView0, ActiveView1, PassiveView1),
+  {ok, State1}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -145,12 +151,6 @@ handle_call(_Request, State) ->
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   remove_handler).
 
-handle_info({'DOWN', MonitorRef, _, _, _}, State = #state{monitor_ref = MonitorRef}) ->
-  %% We should just mark the monitor_ref as undefined
-  %% And set active_view, and passive view to empty
-  State1 = State#state{monitor_ref = undefined, active_view = [], passive_view = []},
-  advertise(State, State1),
-  {ok, State};
 handle_info(Info, State) ->
   lager:warning("Received unknown info: ~p, in state: ~p", [Info, State]),
   {ok, State}.
@@ -188,15 +188,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-maybe_restore_monitor_ref(State = #state{monitor_ref = undefined}) ->
-  Ref = monitor(process, lashup_hyparview_membership),
-  State#state{monitor_ref = Ref};
-maybe_restore_monitor_ref(State) ->
-  State.
-
-advertise(
-  _OldState = #state{active_view = _ActiveView1, passive_view = _PassiveView1, callback = CB},
-  _NewState = #state{active_view = ActiveView2, passive_view = PassiveView2}) ->
-  {ok, Ref} = timer:kill_after(5000),
-  CB(#{type => current_views, passive_view => PassiveView2, active_view => ActiveView2}),
-  timer:cancel(Ref).
+advertise(#state{reference = Reference, pid = Pid}, ActiveView0, PassiveView0, ActiveView1, PassiveView1) ->
+  Event = #{type => current_views, ref => Reference, old_passive_view => PassiveView0, old_active_view => ActiveView0,
+    passive_view => PassiveView1, active_view => ActiveView1},
+  Pid ! {?MODULE, Event},
+  ok.

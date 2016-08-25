@@ -32,7 +32,7 @@ start_link() ->
 %% ===================================================================
 
 init([]) ->
-  {ok, { {rest_for_one, 5, 10}, [
+  {ok, { {one_for_all, 5, 10}, [
     ?CHILD(lashup_hyparview_ping_events, worker),
     ?CHILD(lashup_hyparview_events, worker),
     ?CHILD(lashup_hyparview_ping_handler, worker),
