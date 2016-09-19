@@ -23,6 +23,7 @@
   delete_node/1,
   reachable/1,
   get_tree/1,
+  get_tree/2,
   distance/2,
   reachable_nodes/1,
   unreachable_nodes/1,
@@ -154,11 +155,15 @@ path_to(Node, Tree, Acc) ->
 
 -spec(get_tree(Node :: node()) -> {tree, tree()} | false).
 get_tree(Node) ->
+  get_tree(Node, 5000).
+
+-spec(get_tree(Node :: node(), Timeout :: non_neg_integer() | infinity) -> {tree, tree()} | false).
+get_tree(Node, Timeout) ->
   case fetch_tree_from_cache(Node) of
     {tree, Tree} ->
       {tree, Tree};
     false ->
-      gen_server:call(?SERVER, {get_tree, Node})
+      gen_server:call(?SERVER, {get_tree, Node}, Timeout)
   end.
 
 
@@ -383,7 +388,7 @@ handle_update_node(Node, Dsts, State) ->
     InitialNeighbors ->
       State;
     _ ->
-      update_local_tree(State)
+      increment_cache_version(State)
   end.
 
 -spec(handle_delete_node(Node ::node(), State :: state()) -> state()).
@@ -393,14 +398,11 @@ handle_delete_node(Node, State) ->
   ets:select_delete(edges, MatchSpec1),
   MatchSpec2 = ets:fun2ms(fun(#edge{src = Src}) when Src == Node -> true end),
   ets:select_delete(edges, MatchSpec2),
-  update_local_tree(State).
+  increment_cache_version(State).
 
-%% TODO: Maybe we should fire an event here for reachability data?
-update_local_tree(State) ->
-  Root = node(),
-  NewCacheVersion = State#state.cache_version + 1,
-  State1 = State#state{cache_version = NewCacheVersion},
-  maybe_build_and_cache_tree(Root, State1),
+-spec(increment_cache_version(State :: state()) -> state()).
+increment_cache_version(State = #state{cache_version = CV}) ->
+  State1 = State#state{cache_version = CV + 1},
   bust_cache(State1),
   State1.
 

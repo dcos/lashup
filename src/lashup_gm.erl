@@ -153,7 +153,7 @@ handle_call({subscribe, Pid}, _From, State) ->
 handle_call(get_subscriptions, _From, State = #state{subscriptions = Subscriptions}) ->
   {reply, Subscriptions, State};
 handle_call(update_node, _From, State) ->
-  State1 = update_node(State),
+  State1 = update_node(timed_refresh, State),
   {reply, 300000, State1};
 handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
@@ -184,7 +184,7 @@ handle_cast(#{message := remote_event, from := From, event := #{message := updat
   State1 = handle_updated_node(From, UpdatedNode, State),
   {noreply, State1};
 handle_cast(update_node, State) ->
-  State1 = update_node(State),
+  State1 = update_node(internal_cast, State),
   {noreply, State1};
 
 handle_cast(Request, State) ->
@@ -346,19 +346,20 @@ init_node(State) ->
 
 
 %% @private Update the local node's DVVSet
-update_node(State) ->
+update_node(Reason, State) ->
   NewValue = new_value(State),
-  update_node(NewValue, State).
+  update_node(NewValue, Reason, State).
 
 %% @private Take an updated Value from the local node, turn it into a message and propagate it
-update_node(NewValue, State) ->
+update_node(NewValue, Reason, State) ->
   %% TODO:
   %% Adjust TTL based on maximum path length from link-state database
   Message = #{
     message => updated_node,
     node => node(),
     ttl => 10,
-    value => NewValue
+    value => NewValue,
+    reason => Reason
   },
   handle_updated_node(node(), Message, State).
 
