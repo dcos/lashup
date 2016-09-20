@@ -10,6 +10,9 @@
 %% ===================================================================
 
 start(_StartType, _StartArgs) ->
+  ok = exometer:ensure([lashup_gm_mc, with_tree], spiral, []),
+  ok = exometer:ensure([lashup_gm_mc, without_tree], spiral, []),
+  ok = exometer:ensure([lashup_gm_mc, drop_noconnect], spiral, []),
   lashup_sup:start_link().
 
 stop(_State) ->
