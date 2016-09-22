@@ -33,7 +33,6 @@ start_link() ->
 
 init([]) ->
   {ok, { {one_for_all, 5, 10}, [
-    ?CHILD(lashup_hyparview_ping_events, worker),
     ?CHILD(lashup_hyparview_events, worker),
     ?CHILD(lashup_hyparview_ping_handler, worker),
     ?CHILD(lashup_hyparview_membership, worker),

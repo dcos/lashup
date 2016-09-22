@@ -24,8 +24,10 @@
     code_change/3]).
 
 -define(SERVER, ?MODULE).
+%% A node must be connected for 30 seconds before we attempt AAE
+-define(AAE_AFTER, 30000).
 
--record(state, {}).
+-record(state, {hyparview_event_ref, active_view = []}).
 
 %%%===================================================================
 %%% API
@@ -61,8 +63,9 @@ start_link() ->
     {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
 init([]) ->
+    {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
     timer:send_after(0, refresh),
-    {ok, #state{}}.
+    {ok, #state{hyparview_event_ref = HyparviewEventsRef}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -110,9 +113,17 @@ handle_cast(_Request, State) ->
     {noreply, NewState :: #state{}} |
     {noreply, NewState :: #state{}, timeout() | hibernate} |
     {stop, Reason :: term(), NewState :: #state{}}).
-handle_info(refresh, State) ->
-    refresh(),
+handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, active_view := ActiveView}},
+    State0 = #state{hyparview_event_ref = EventRef}) ->
+    State1 = State0#state{active_view = ActiveView},
+    refresh(ActiveView),
+    {noreply, State1};
+handle_info(refresh, State = #state{active_view = ActiveView}) ->
+    refresh(ActiveView),
     timer:send_after(5000, refresh),
+    {noreply, State};
+handle_info({start_child, Child}, State = #state{active_view = ActiveView}) ->
+    maybe_start_child(Child, ActiveView),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -150,9 +161,22 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-refresh() ->
-    ActiveView = lashup_hyparview_membership:get_active_view(),
+refresh(ActiveView) ->
     AllChildren = supervisor:which_children(lashup_kv_aae_sup),
     TxChildren = [Id || {{tx, Id}, _Child, _Type, _Modules} <- AllChildren],
     ChildrenToStart = ActiveView -- TxChildren,
-    lists:foreach(fun lashup_kv_aae_sup:start_aae/1, ChildrenToStart).
+    lists:foreach(
+        fun(Child) ->
+            SleepTime = trunc((1 + rand:uniform()) * ?AAE_AFTER),
+            timer:send_after(SleepTime, {start_child, Child})
+        end,
+        ChildrenToStart).
+
+maybe_start_child(Child, ActiveView) ->
+    case lists:member(Child, ActiveView) of
+        true ->
+            lashup_kv_aae_sup:start_aae(Child);
+        false ->
+            ok
+    end.
+    %lists:foreach(fun lashup_kv_aae_sup:start_aae/1, ChildrenToStart).

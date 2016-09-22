@@ -9,7 +9,8 @@
                   kernel,
                   stdlib,
                   lager,
-                  riak_dt
+                  riak_dt,
+                  exometer_core
                  ]},
   {mod, { lashup_app, []}},
   {env, []}

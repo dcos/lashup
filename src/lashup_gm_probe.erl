@@ -192,7 +192,7 @@ determine_next_probe(ReachableNodes, UnreachableNode) ->
 
 -spec(maybe_do_probe(state()) -> ok).
 maybe_do_probe(_State) ->
-  case lashup_gm_route:get_tree(node()) of
+  case lashup_gm_route:get_tree(node(), infinity) of
     {tree, Tree} ->
       do_probe(Tree);
     false ->

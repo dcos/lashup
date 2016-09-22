@@ -184,6 +184,9 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_info(#{type := multicast_packet} = MulticastPacket, State) ->
+  handle_multicast_packet(MulticastPacket, State),
+  {noreply, State};
 handle_info(_Info, State) ->
   {noreply, State}.
 
@@ -285,7 +288,14 @@ determine_fakeroots(ActiveView, _Fanout) ->
 %% @end
 -spec(do_original_cast(node(), multicast_packet()) -> ok).
 do_original_cast(Node, Packet) ->
-  Packet1 = Packet#{fakeroot => Node},
+  Packet0 = Packet#{fakeroot => Node},
+  Packet1 =
+    case lashup_gm_route:get_tree(Node) of
+      {tree, Tree} ->
+        Packet0#{tree => Tree};
+      _ ->
+        Packet0
+    end,
   gen_server:cast({?SERVER, Node}, Packet1),
   ok.
 
@@ -335,11 +345,17 @@ maybe_forward_packet(_MulticastPacket = #{ttl := 0, no_ttl_warning := true}, _St
 maybe_forward_packet(_MulticastPacket = #{ttl := 0}, _State) ->
   lager:warning("TTL Exceeded on Multicast Packet"),
   ok;
-maybe_forward_packet(MulticastPacket = #{fakeroot := FakeRoot, ttl := TTL, origin := Origin, options := Options},
+maybe_forward_packet(MulticastPacket0 = #{tree := Tree, ttl := TTL, options := Options}, State) ->
+  exometer:update([lashup_gm_mc, with_tree], 1),
+  MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
+  MulticastPacket2 = lists:foldl(fun maybe_add_forwarding_options/2, MulticastPacket1, Options),
+  forward_packet(MulticastPacket2, Tree, State);
+maybe_forward_packet(MulticastPacket0 = #{fakeroot := FakeRoot, ttl := TTL, origin := Origin, options := Options},
     State) ->
+  exometer:update([lashup_gm_mc, without_tree], 1),
   case lashup_gm_route:get_tree(FakeRoot) of
     {tree, Tree} ->
-      MulticastPacket1 = MulticastPacket#{ttl := TTL - 1},
+      MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
       MulticastPacket2 = lists:foldl(fun maybe_add_forwarding_options/2, MulticastPacket1, Options),
       forward_packet(MulticastPacket2, Tree, State);
     false ->
@@ -347,19 +363,29 @@ maybe_forward_packet(MulticastPacket = #{fakeroot := FakeRoot, ttl := TTL, origi
       ok
   end.
 
-
+%% TODO: Only abcast to connected nodes
 -spec(forward_packet(multicast_packet(), lashup_gm_route:tree(), state()) -> ok).
 forward_packet(MulticastPacket = #{only_nodes := Nodes}, Tree, _State) ->
   Trees = [lashup_gm_route:prune_tree(Node, Tree) || Node <- Nodes],
   Tree1 = lists:foldl(fun maps:merge/2, #{}, Trees),
   Children = lashup_gm_route:children(node(), Tree1),
-  gen_server:abcast(Children, ?SERVER, MulticastPacket),
+  bsend(MulticastPacket, Children),
   ok;
 forward_packet(MulticastPacket, Tree, _State) ->
   Children = lashup_gm_route:children(node(), Tree),
-  gen_server:abcast(Children, ?SERVER, MulticastPacket),
+  bsend(MulticastPacket, Children),
   ok.
 
+bsend(MulticastPacket, Children) ->
+  lists:foreach(
+    fun(Child) ->
+      case erlang:send({?SERVER, Child}, MulticastPacket, [noconnect]) of
+        noconnect ->
+          exometer:update([lashup_gm_mc, drop_noconnect], 1);
+        _ ->
+          ok
+      end
+    end, Children).
 
 %% @doc
 %% Add options is a function that's folded over all the options

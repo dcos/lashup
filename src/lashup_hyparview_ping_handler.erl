@@ -30,31 +30,14 @@
 %% In seconds
 %% We both use this to trim samples, and nodes totally from the dict
 -define(PING_RETENTION_TIME, 60).
-%% This is to purge nodes that left our active view
-%% It really should be bigger than the ping retention time
-%% It is when we last saw them
-%% Not a matter of running retention time and retention count on them
--define(PING_PURGE_INTERVAL, 900).
-
-%% If we don't ping the node for 60 seconds, we can invalidate the history
--define(PING_CONTUINITY, 10).
 
 -define(MAX_PING_MS, 1000).
+%% This is here as a "noise floor"
+-define(MIN_PING_MS, 100).
 
 %% LOG_BASE calculated by taking
 %% log(?MAX_PING_MS) / ?LOG_BASE ~= ?MAX_PING_MS
 -define(LOG_BASE, 1.007).
-
-
-%% Given how the failure detector is tuned today, we might do 100 pings to a given node in
-%% out active view in between 10-60 seconds.
-
-%% So, I could do something clever, where if we have an old RTT that was high
-%% We could rule it out
-%% But, these anomalies should automatically cut themselves out via the
-
-%% Recorded time, and RTT are both in "native"
--type ping_record() :: {RecordedTime :: integer(), RTT :: integer()}.
 
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
@@ -105,10 +88,10 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  process_flag(priority, high),
+  ok = net_kernel:monitor_nodes(true),
   %% The reason not to randomize this is that we'd prefer all nodes pause around the same time
   %% It creates an easier to debug situation if this call actually does kill performance
-  SendIntervalMS = erlang:convert_time_unit(?PING_PURGE_INTERVAL, seconds, milli_seconds),
-  timer:send_interval(SendIntervalMS, purge),
   {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -166,8 +149,9 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
-handle_info(purge, State) ->
-  State1 = handle_purge(State),
+handle_info({nodedown, NodeName}, State0 = #state{ping_times = PingTimes0}) ->
+  PingTimes1 = maps:remove(NodeName, PingTimes0),
+  State1 = State0#state{ping_times = PingTimes1},
   {noreply, State1};
 handle_info({ping_failed, NRef}, State) ->
   State1 = handle_ping_failed(NRef, State),
@@ -211,25 +195,23 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 -spec(do_ping(Node :: node(), State :: state()) -> State1 :: state()).
-do_ping(Node, State) ->
-  PIF = State#state.pings_in_flight,
-  Now = erlang:monotonic_time(),
+do_ping(Node, State0 = #state{pings_in_flight = PIF}) ->
+  Now = erlang:monotonic_time(milli_seconds),
   Ref = make_ref(),
-  {MaxEstRTT, State1} = determine_ping_time(Node, State),
+  MaxEstRTT = determine_ping_time(Node, State0),
   {ok, TimerRef} = timer:send_after(MaxEstRTT, {ping_failed, Ref}),
   gen_server:cast({?SERVER, Node}, #{message => ping, from => self(), now => Now, ref => Ref, timer_ref => TimerRef}),
   PIF2 = orddict:store(Ref, {MaxEstRTT, Node}, PIF),
-  State1#state{pings_in_flight = PIF2}.
+  State0#state{pings_in_flight = PIF2}.
 
 -spec(handle_ping_failed(Ref :: reference(), State :: state()) -> State1 :: state()).
-handle_ping_failed(Ref, State = #state{ping_times = PingTimes}) ->
-  PIF = State#state.pings_in_flight,
+handle_ping_failed(Ref, State = #state{ping_times = PingTimes, pings_in_flight = PIF}) ->
   case orddict:find(Ref, PIF) of
     {ok, {RTT, Node}} ->
       lager:info("Didn't receive Pong from Node: ~p in time: ~p", [Node, RTT]),
       lashup_hyparview_membership:ping_failed(Node),
       PIF2 = orddict:erase(Ref, PIF),
-      PingTimes2 = maps:without([Node], PingTimes),
+      PingTimes2 = maps:remove(Node, PingTimes),
       State#state{pings_in_flight = PIF2, ping_times = PingTimes2};
     error ->
       State
@@ -241,94 +223,33 @@ handle_ping(PingMessage = #{from := From}, _State) ->
   gen_server:cast(From, PongMessage),
   ok.
 
-%% TODO: Keep track of RTTs somewhere
-
--spec(handle_pong(PongMessage :: pong_message(), State :: state()) -> State1 :: state()).
-handle_pong(PongMessage = #{ref := Ref, timer_ref := TimerRef}, State) ->
+-spec(handle_pong(PongMessage :: pong_message(), State0 :: state()) -> State1 :: state()).
+handle_pong(PongMessage = #{ref := Ref, timer_ref := TimerRef}, State0 = #state{pings_in_flight = PIF0}) ->
   lashup_hyparview_membership:recognize_pong(PongMessage),
-  PIF = State#state.pings_in_flight,
   timer:cancel(TimerRef),
-  PIF2 = orddict:erase(Ref, PIF),
-  State1 = record_pong(PongMessage, State),
-  State1#state{pings_in_flight = PIF2}.
+  PIF1 = orddict:erase(Ref, PIF0),
+  State1 = record_pong(PongMessage, State0),
+  State1#state{pings_in_flight = PIF1}.
 
 %% This stores the pongs and pong timings
 -spec(record_pong(PongMessage :: pong_message(), State :: state()) -> State1 :: state()).
 record_pong(_PongMessage = #{receiving_node := ReceivingNode, now := SendTime},
-    State = #state{ping_times = PingTimes}) ->
+    State0 = #state{ping_times = PingTimes}) ->
   %% {RecordedTime :: integer(), RTT :: integer()}
-  Now = erlang:monotonic_time(),
-  RTT = Now - SendTime,
-  RetentionTime = Now - erlang:convert_time_unit(?PING_RETENTION_TIME, seconds, native),
-  %% Filters both on retention time
-  %% And retention count
-  %% Contuinity should be handled at ping time, I think
-  RecordedTimes = maps:get(ReceivingNode, PingTimes, []),
-  RecordedTimes1 = lists:sublist(RecordedTimes, 1, ?PING_RETENTION_COUNT - 1),
-  RecordedTimes2 = [Entry || Entry = {RecordedTime, _} <- RecordedTimes1, RecordedTime > RetentionTime],
-  RecordedTimes3 = [{Now, RTT}|RecordedTimes2],
-  PingTimes1 = PingTimes#{ReceivingNode => RecordedTimes3},
-  lashup_hyparview_ping_events:ingest(#{ReceivingNode => RecordedTimes3}),
-  State#state{ping_times = PingTimes1}.
+  Now = erlang:monotonic_time(milli_seconds),
+  LastRTT = Now - SendTime,
+  PingTimes1 = PingTimes#{ReceivingNode => LastRTT},
+  State0#state{ping_times = PingTimes1}.
 
--spec(determine_ping_time(Node :: node(), State :: state()) -> {RTT :: non_neg_integer(), State1 :: state()}).
-determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
+%% RTT is in milliseconds
+-spec(determine_ping_time(Node :: node(), State :: state()) -> RTT :: non_neg_integer()).
+determine_ping_time(Node, #state{ping_times = PingTimes})  ->
   %% If unknown then might as well return the MAX PING
   case maps:find(Node, PingTimes) of
     error ->
-      {?MAX_PING_MS, State};
-    {ok, PingRecords} ->
-      {RTT, PingRecords1} = determine_ping_time2(PingRecords),
-      PingTimes1 = PingTimes#{Node := PingRecords1},
-      State1 = State#state{ping_times = PingTimes1},
-      {RTT, State1}
+      ?MAX_PING_MS;
+    {ok, LastRTT} ->
+      %% 2 MS is the noise floor
+      RTT = lists:max([?MIN_PING_MS, LastRTT]),
+      trunc(math:log(RTT) / math:log(?LOG_BASE))
   end.
-
--spec(determine_ping_time2([ping_record()]) -> {RTT :: non_neg_integer(), [ping_record()]}).
-determine_ping_time2(RecordedTimes) ->
-  Now = erlang:monotonic_time(),
-  RetentionTime = Now - erlang:convert_time_unit(?PING_RETENTION_TIME, seconds, native),
-  RecordedTimes1 = [Entry || Entry = {RecordedTime, _} <- RecordedTimes, RecordedTime > RetentionTime],
-  case RecordedTimes1 of
-    [] ->
-      {?MAX_PING_MS, []};
-    _ ->
-      [InitialAcc|Rest] = RecordedTimes1,
-      RecordedTimes2 = lists:foldl(fun filter_continuity_fold/2, [InitialAcc], Rest),
-      RTTs = [RTT || {_, RTT} <- RecordedTimes2],
-      %% This is to ensure there is one non-zero RTT in the list
-      MaxRTT = lists:max([0.1|RTTs]),
-      MSPerNative = erlang:convert_time_unit(1, milli_seconds, native),
-      MaxRTTMS = MSPerNative * MaxRTT,
-
-      %% Any ping below 2ms is too "noisey" to matter
-      MaxRTTMSBound = math:log(1 + MaxRTTMS) / math:log(?LOG_BASE),
-      MaxRTTMSBound1 = trunc(min(MaxRTTMSBound, ?MAX_PING_MS)),
-      {MaxRTTMSBound1, RecordedTimes2}
-  end.
-
--spec(filter_continuity_fold(ping_record(), [ping_record()]) -> [ping_record()]).
-filter_continuity_fold(Elem = {ElemRecordedTime, _}, Acc = [{LastRecordedTime, _}|_]) ->
-  MaxDelta = erlang:convert_time_unit(?PING_CONTUINITY, seconds, native),
-  case LastRecordedTime - ElemRecordedTime > MaxDelta of
-    true ->
-      Acc;
-    false ->
-      [Elem|Acc]
-  end.
-
--spec(handle_purge(state()) -> state()).
-handle_purge(State = #state{ping_times = PingTimes}) ->
-  Now = erlang:monotonic_time(),
-  LastOkay = Now -  erlang:convert_time_unit(?PING_PURGE_INTERVAL, seconds, native),
-  Predicate =
-    fun
-      (_Key, []) ->
-        false;
-      (_Key, [{_RTT, Recorded}|_]) when Recorded < LastOkay ->
-        false;
-      (_Key, _) ->
-        true
-    end,
-  PingTimes1 = maps:filter(Predicate, PingTimes),
-  State#state{ping_times = PingTimes1}.
