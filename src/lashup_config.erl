@@ -159,27 +159,35 @@ aae_neighbor_check_interval() ->
 naive_prefixes() ->
   get_env(naive_prefixes, ["minuteman", "navstar"]).
 
+-spec(shuffle_interval() -> non_neg_integer()).
 shuffle_interval() ->
   get_env(default_shuffle_interval, ?DEFAULT_SHUFFLE_INTERVAL).
 
+-spec(join_interval() -> non_neg_integer()).
 join_interval() ->
   get_env(join_interval, ?DEFAULT_JOIN_INTERVAL).
 
+-spec(active_view_size() -> non_neg_integer()).
 active_view_size() ->
   get_env(active_view_size, ?DEFAULT_ACTIVE_VIEW_SIZE).
 
+-spec(passive_view_size() -> non_neg_integer()).
 passive_view_size() ->
   get_env(passive_view_size, ?DEFAULT_PASSIVE_VIEW_SIZE).
 
+-spec(neighbor_interval() -> non_neg_integer()).
 neighbor_interval() ->
   get_env(neighbor_interval, ?DEFAULT_NEIGHBOR_INTERVAL).
 
+-spec(min_ping_ms() -> non_neg_integer()).
 min_ping_ms() ->
   get_env(min_ping_ms, ?DEFAULT_MIN_PING_MS).
 
+-spec(max_ping_ms() -> non_neg_integer()).
 max_ping_ms() ->
   get_env(max_ping_ms, ?DEFAULT_MAX_PING_MS).
 
+-spec(ping_log_base() -> float()).
 ping_log_base() ->
   get_env(ping_log_base, ?DEFAULT_LOG_BASE).
 
