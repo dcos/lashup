@@ -8,6 +8,30 @@
 %%%-------------------------------------------------------------------
 -module(lashup_config).
 -author("sdhillon").
+%% These are the constants for the sizes of views from the lashup paper
+-define(K, 6).
+
+%% The original C was 1
+%% I think for our use-case, we can bump it to 3?
+-define(C, 1).
+% This number is actually log10(10000)
+-define(LOG_TOTAL_MEMBERS, 4).
+
+-define(DEFAULT_ACTIVE_VIEW_SIZE, ?LOG_TOTAL_MEMBERS + ?C).
+-define(DEFAULT_PASSIVE_VIEW_SIZE, ?K * (?LOG_TOTAL_MEMBERS + ?C)).
+%% The interval that we try to join the contact nodes in milliseconds
+-define(DEFAULT_JOIN_INTERVAL, 1000).
+-define(DEFAULT_NEIGHBOR_INTERVAL, 10000).
+
+-define(DEFAULT_SHUFFLE_INTERVAL, 60000).
+
+-define(DEFAULT_MAX_PING_MS, 1000).
+%% This is here as a "noise floor"
+-define(DEFAULT_MIN_PING_MS, 100).
+
+%% LOG_BASE calculated by taking
+%% log(?MAX_PING_MS) / ?LOG_BASE ~= ?MAX_PING_MS
+-define(DEFAULT_LOG_BASE, 1.007).
 
 %% API
 -export([
@@ -21,9 +45,18 @@
   aae_interval/0,
   work_dir/0,
   bloom_interval/0,
-  key_aae_interval/0,
+  aae_after/0,
   join_timeout/0,
-  naive_prefixes/0
+  naive_prefixes/0,
+  aae_neighbor_check_interval/0,
+  shuffle_interval/0,
+  active_view_size/0,
+  passive_view_size/0,
+  join_interval/0,
+  neighbor_interval/0,
+  min_ping_ms/0,
+  max_ping_ms/0,
+  ping_log_base/0
 ]).
 
 %% @doc
@@ -113,10 +146,39 @@ bloom_interval() ->
 
 
 %% @doc
-%% How often we message our bloom filter for AAE in milliseconds
-key_aae_interval() ->
-  application:get_env(lashup, key_aae_interval, 600000).
+%% How long we wait until we begin to do AAE
+aae_after() ->
+  application:get_env(lashup, aae_after, 30000).
+
+%% @doc
+%% How often we see if there are any neighbors connected
+aae_neighbor_check_interval() ->
+  application:get_env(lashup, aae_neighbor_check_interval, 5000).
 
 -spec(naive_prefixes() -> [string()]).
 naive_prefixes() ->
   application:get_env(lashup, naive_prefixes, ["minuteman", "navstar"]).
+
+shuffle_interval() ->
+  application:get_env(lashup, default_shuffle_interval, ?DEFAULT_SHUFFLE_INTERVAL).
+
+join_interval() ->
+  application:get_env(lashup, join_interval, ?DEFAULT_JOIN_INTERVAL).
+
+active_view_size() ->
+  application:get_env(lashup, active_view_size, ?DEFAULT_ACTIVE_VIEW_SIZE).
+
+passive_view_size() ->
+  application:get_env(lashup, passive_view_size, ?DEFAULT_PASSIVE_VIEW_SIZE).
+
+neighbor_interval() ->
+  application:get_env(lashup, neighbor_interval, ?DEFAULT_NEIGHBOR_INTERVAL).
+
+min_ping_ms() ->
+  application:get_env(lashup, min_ping_ms, ?DEFAULT_MIN_PING_MS).
+
+max_ping_ms() ->
+  application:get_env(lashup, max_ping_ms, ?DEFAULT_MAX_PING_MS).
+
+ping_log_base() ->
+  application:get_env(lashup, ping_log_base, ?DEFAULT_LOG_BASE).

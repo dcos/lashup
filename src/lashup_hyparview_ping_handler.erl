@@ -25,23 +25,12 @@
 
 -define(SERVER, ?MODULE).
 
-
--define(PING_RETENTION_COUNT, 100).
-%% In seconds
-%% We both use this to trim samples, and nodes totally from the dict
--define(PING_RETENTION_TIME, 60).
-
--define(MAX_PING_MS, 1000).
-%% This is here as a "noise floor"
--define(MIN_PING_MS, 100).
-
-%% LOG_BASE calculated by taking
-%% log(?MAX_PING_MS) / ?LOG_BASE ~= ?MAX_PING_MS
--define(LOG_BASE, 1.007).
-
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
-  ping_times = #{} :: map()
+  ping_times = #{} :: map(),
+  log_base = lashup_config:ping_log_base() :: float(),
+  min_ping_ms = lashup_config:min_ping_ms() :: non_neg_integer(),
+  max_ping_ms = lashup_config:max_ping_ms() :: non_neg_integer()
 }).
 -type state() :: #state{}.
 
@@ -243,13 +232,13 @@ record_pong(_PongMessage = #{receiving_node := ReceivingNode, now := SendTime},
 
 %% RTT is in milliseconds
 -spec(determine_ping_time(Node :: node(), State :: state()) -> RTT :: non_neg_integer()).
-determine_ping_time(Node, #state{ping_times = PingTimes})  ->
+determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
   %% If unknown then might as well return the MAX PING
   case maps:find(Node, PingTimes) of
     error ->
-      ?MAX_PING_MS;
+      State#state.max_ping_ms;
     {ok, LastRTT} ->
       %% 2 MS is the noise floor
-      RTT = lists:max([?MIN_PING_MS, LastRTT]),
-      trunc(math:log(RTT) / math:log(?LOG_BASE))
+      RTT = lists:max([State#state.min_ping_ms, LastRTT]),
+      trunc(math:log(RTT) / math:log(State#state.log_base))
   end.
