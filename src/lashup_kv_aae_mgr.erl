@@ -120,7 +120,7 @@ handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, 
     {noreply, State1};
 handle_info(refresh, State = #state{active_view = ActiveView}) ->
     refresh(ActiveView),
-    timer:send_after(5000, refresh),
+    timer:send_after(lashup_config:aae_neighbor_check_interval(), refresh),
     {noreply, State};
 handle_info({start_child, Child}, State = #state{active_view = ActiveView}) ->
     maybe_start_child(Child, ActiveView),
@@ -167,7 +167,7 @@ refresh(ActiveView) ->
     ChildrenToStart = ActiveView -- TxChildren,
     lists:foreach(
         fun(Child) ->
-            SleepTime = trunc((1 + rand:uniform()) * ?AAE_AFTER),
+            SleepTime = trunc((1 + rand:uniform()) * lashup_config:aae_after()),
             timer:send_after(SleepTime, {start_child, Child})
         end,
         ChildrenToStart).

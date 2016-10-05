@@ -32,22 +32,6 @@
   code_change/3]).
 
 -include("lashup.hrl").
-%% These are the constants for the sizes of views from the lashup paper
--define(K, 6).
-
-%% The original C was 1
-%% I think for our use-case, we can bump it to 3?
--define(C, 1).
-% This number is actually log10(10000)
--define(LOG_TOTAL_MEMBERS, 4).
-
--define(ACTIVE_VIEW_SIZE, ?LOG_TOTAL_MEMBERS + ?C).
--define(PASSIVE_VIEW_SIZE, ?K * (?LOG_TOTAL_MEMBERS + ?C)).
-%% The interval that we try to join the contact nodes in milliseconds
--define(JOIN_INTERVAL, 1000).
--define(NEIGHBOR_INTERVAL, 10000).
-
--define(SHUFFLE_INTERVAL, 60000).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -71,7 +55,11 @@
   join_window,
   ping_idx = 1 :: pos_integer(),
   joined = false :: boolean(),
-  extra_masters = [] :: [node()]
+  extra_masters = [] :: [node()],
+  shuffle_interval = lashup_config:shuffle_interval() :: non_neg_integer(),
+  join_interval = lashup_config:join_interval() :: non_neg_integer(),
+  active_view_size = lashup_config:active_view_size() :: non_neg_integer(),
+  passive_view_size = lashup_config:passive_view_size() :: non_neg_integer()
 }).
 
 -type state() :: state().
@@ -262,8 +250,8 @@ handle_info(DownMessage = {'DOWN', _, _, _, _}, State) ->
 %% In fact, the network can get into (healthy) cases where it's not possible
 %% Like running fewer than the active view size count nodes
 %% So, only neighbor if more than 25% of our active view is open.
-handle_info(maybe_neighbor, State = #state{active_view = ActiveView}) when length(
-  ActiveView) >= ?ACTIVE_VIEW_SIZE * 0.75 ->
+handle_info(maybe_neighbor, State = #state{active_view = ActiveView, active_view_size = ACTIVE_VIEW_SIZE})
+    when length(ActiveView) >= ACTIVE_VIEW_SIZE * 0.75 ->
   %% Ignore this, because my active view is full
   reschedule_maybe_neighbor(),
   State1 = State#state{unfilled_active_set_count = 0},
@@ -378,7 +366,7 @@ reschedule_ping(Time) ->
   timer:send_after(Delay, ping_rq).
 
 reschedule_maybe_neighbor() ->
-  reschedule_maybe_neighbor(?NEIGHBOR_INTERVAL).
+  reschedule_maybe_neighbor(lashup_config:neighbor_interval()).
 reschedule_maybe_neighbor(Time) ->
   RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
@@ -386,7 +374,7 @@ reschedule_maybe_neighbor(Time) ->
   timer:send_after(Delay, maybe_neighbor).
 
 reschedule_join() ->
-  reschedule_join(?JOIN_INTERVAL).
+  reschedule_join(lashup_config:join_interval()).
 reschedule_join(BaseTime) ->
   RandFloat = rand:uniform(),
   Multipler = 1 + round(RandFloat),
@@ -476,13 +464,13 @@ trim_ordset_to(Ordset, _Size, DroppedItems) ->
 
 
 -spec(handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
-handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveView}, Ref)
+handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveView, active_view_size = AVS}, Ref)
   when Node =/= node() ->
   lager:debug("Saw join from ~p", [Node]),
   State1 =
   case lashup_utils:count_ticks(JoinWindow) of
     %% Limit it to 25 joins/sec if the active view is full
-    Num when length(ActiveView) == ?ACTIVE_VIEW_SIZE andalso Num < 25 ->
+    Num when length(ActiveView) == AVS andalso Num < 25 ->
       really_handle_join(Node, State, Ref);
     %% If the active view is less than that, throttle to 1 / sec
     Num when Num < 1 ->
@@ -565,13 +553,13 @@ trim_active_view(Size, State = #state{active_view = ActiveView}) ->
   State1.
 
 -spec(try_add_node_to_active_view(node(), state()) -> {ok, state()} | {error, state()}).
-try_add_node_to_active_view(Node, State) when Node =/= node() ->
+try_add_node_to_active_view(Node, State = #state{active_view_size = ActiveViewSize}) when Node =/= node() ->
   %% There is one critical component here -
   %% We have to return a non-error code once we decide to trim from the active view
   %% If we don't, it could end with an asymmetrical graph
   case net_kernel:connect_node(Node) of
     true ->
-      State1 = trim_active_view(?ACTIVE_VIEW_SIZE - 1, State),
+      State1 = trim_active_view(ActiveViewSize - 1, State),
       Monitors1 = State1#state.monitors,
       ActiveView1 = State1#state.active_view,
       PassiveView1 = State1#state.passive_view,
@@ -588,12 +576,13 @@ try_add_node_to_active_view(Node, State) when Node =/= node() ->
 try_add_node_to_active_view(_Node, State) ->
   {error, State}.
 
-maybe_add_node_passive_view(Node, State = #state{active_view = ActiveView, passive_view = PassiveView})
+maybe_add_node_passive_view(Node,
+    State = #state{active_view = ActiveView, passive_view = PassiveView, passive_view_size = PassiveViewSize})
     when Node =/= node() ->
   {ActiveViewNew, PassiveViewNew} = case {ordsets:is_element(Node, ActiveView), ordsets:is_element(Node,
     PassiveView)} of
                                       {false, false} ->
-                                        {PassiveView1, _} = trim_ordset_to(PassiveView, ?PASSIVE_VIEW_SIZE - 1),
+                                        {PassiveView1, _} = trim_ordset_to(PassiveView, PassiveViewSize - 1),
                                         PassiveView2 = ordsets:add_element(Node, PassiveView1),
                                         {ActiveView, PassiveView2};
                                       _ ->
@@ -719,10 +708,10 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
   end.
 
 %% Timeout is actually a minimum time
-maybe_gm_neighbor(Timeout, _State = #state{unfilled_active_set_count = Count})
+maybe_gm_neighbor(Timeout, _State = #state{unfilled_active_set_count = Count, active_view_size = ActiveViewSize})
   when Count rem 5 == 0 andalso Count > 3 ->
   %% This is to ensure that there isn't a dependency loop between us and gm
-  case catch lashup_gm:get_neighbor_recommendations(?ACTIVE_VIEW_SIZE) of
+  case catch lashup_gm:get_neighbor_recommendations(ActiveViewSize) of
     {ok, Node} ->
       lager:info("Get Neighbors Successful: ~p", [Node]),
       send_neighbor_to(Timeout, Node, low),
@@ -748,8 +737,9 @@ send_neighbor_to(Timeout, Node, Priority) when is_integer(Timeout) ->
   gen_server:cast({?SERVER, Node}, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
 
 -spec(handle_neighbor(neighbor(), state()) -> state()).
-handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref}, State = #state{active_view = ActiveView})
-  when length(ActiveView) == ?ACTIVE_VIEW_SIZE ->
+handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
+    State = #state{active_view = ActiveView, active_view_size = ActiveViewSize})
+    when length(ActiveView) == ActiveViewSize ->
   %% The Active neighbor list is full
   lager:info("Denied neighbor request from ~p because active view full", [Sender]),
   PassiveView = State#state.passive_view,
@@ -789,13 +779,13 @@ handle_neighbor_deny(NeighborDeny = #{message := neighbor_deny, sender := Sender
   push_state(State1),
   State1.
 
-neighbor_deny_combine_passive_view(#{passive_view := RemotePassiveView}, State) ->
+neighbor_deny_combine_passive_view(#{passive_view := RemotePassiveView}, State = #state{passive_view_size = PVS}) ->
   PassiveView = State#state.passive_view,
   ActiveView = State#state.active_view,
   LargeCombinedView = ordsets:union(RemotePassiveView, PassiveView),
   LargeCombinedView1 = ordsets:subtract(LargeCombinedView, ActiveView),
   LargeCombinedView2 = ordsets:del_element(node(), LargeCombinedView1),
-  {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, ?PASSIVE_VIEW_SIZE),
+  {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, PVS),
   State#state{passive_view = NewPassiveView};
 neighbor_deny_combine_passive_view(_, State) ->
   State.
@@ -905,7 +895,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
       State
   end.
 do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemotePassiveView, node := Node},
-  State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
+  State = #state{passive_view = MyPassiveView, active_view = MyActiveView, passive_view_size = PassiveViewSize}) ->
   ReplyNodes1 = ordsets:subtract(MyPassiveView, RemoteActiveView),
   ReplyNodes2 = ordsets:subtract(ReplyNodes1, RemotePassiveView),
   ShuffleReply = #{message => shuffle_reply, node => node(), combined_view => ReplyNodes2},
@@ -915,7 +905,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
   LargeCombinedView = ordsets:union([MyPassiveView, RemoteActiveView, RemotePassiveView]),
   LargeCombinedView1 = ordsets:subtract(LargeCombinedView, MyActiveView),
   LargeCombinedView2 = ordsets:del_element(node(), LargeCombinedView1),
-  {CombinedView, _} = trim_ordset_to(LargeCombinedView2, ?PASSIVE_VIEW_SIZE),
+  {CombinedView, _} = trim_ordset_to(LargeCombinedView2, PassiveViewSize),
   State#state{passive_view = CombinedView}.
 
 
@@ -923,7 +913,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
 try_shuffle(_State = #state{active_view = []}) ->
   lager:info("Could not shuffle because active view empty"),
   10000;
-try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
+try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView, passive_view_size = PVS}) ->
   %% TODO:
   %% -Make TTL Configurable
   %% -Allow for limiting view sizes further
@@ -938,7 +928,7 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
   Node = choose_node(ActiveView),
   gen_server:cast({?SERVER, Node}, Shuffle),
   case length(PassiveView) of
-    Size when Size < 0.5 * ?PASSIVE_VIEW_SIZE ->
+    Size when Size < 0.5 * PVS ->
       5000;
     _ ->
       60000
@@ -946,11 +936,11 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
 
 -spec(handle_shuffle_reply(shuffle_reply(), state()) -> state()).
 handle_shuffle_reply(_ShuffleReply = #{combined_view := CombinedView},
-    State = #state{passive_view = MyPassiveView, active_view = MyActiveView}) ->
+    State = #state{passive_view = MyPassiveView, active_view = MyActiveView, passive_view_size = PassiveViewSize}) ->
   LargeCombinedView = ordsets:union(CombinedView, MyPassiveView),
   LargeCombinedView1 = ordsets:subtract(LargeCombinedView, MyActiveView),
   LargeCombinedView2 = ordsets:del_element(node(), LargeCombinedView1),
-  {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, ?PASSIVE_VIEW_SIZE),
+  {NewPassiveView, _} = trim_ordset_to(LargeCombinedView2, PassiveViewSize),
   State1 = State#state{passive_view = NewPassiveView},
   push_state(State1),
   State1.
