@@ -20,6 +20,14 @@ start_link(Node) ->
 
 %% Start in the initiator role
 init([Node]) ->
+    case lists:member(Node, nodes()) of
+        true ->
+            init2(Node);
+        false ->
+            {stop, node_disconnected}
+    end.
+
+init2(Node) ->
     case gen_server:call({lashup_kv, Node}, {start_kv_sync_fsm, node(), self()}) of
         {error, unknown_request} ->
             {stop, remote_node_no_aae};
