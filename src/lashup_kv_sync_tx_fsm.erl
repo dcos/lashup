@@ -9,7 +9,7 @@
 -export([tx_sync/3, idle/3]).
 
 %% Internal APIs
--export([init/1, code_change/4, terminate/3]).
+-export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
 -include("lashup_kv.hrl").
 -record(state, {node, monitor_ref, remote_pid}).
@@ -36,8 +36,11 @@ init2(Node) ->
         {ok, RemoteChildPid} ->
             MonitorRef = monitor(process, RemoteChildPid),
             StateData = #state{node = Node, monitor_ref = MonitorRef, remote_pid = RemoteChildPid},
-            {state_functions, tx_sync, StateData, [{next_event, internal, start_sync}]}
+            {ok, tx_sync, StateData, [{next_event, internal, start_sync}]}
     end.
+
+callback_mode() ->
+    state_functions.
 
 tx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
@@ -79,7 +82,7 @@ idle(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{moni
     handle_disconnect(Disconnect).
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
-    {state_functions, OldState, OldData}.
+    {ok, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
     lager:warning("KV AAE terminated (~p): ~p", [State, Reason]).
