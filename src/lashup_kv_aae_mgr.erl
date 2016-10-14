@@ -28,6 +28,7 @@
 -define(AAE_AFTER, 30000).
 
 -record(state, {hyparview_event_ref, active_view = []}).
+-type state() :: #state{}.
 
 %%%===================================================================
 %%% API
@@ -60,7 +61,7 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(Args :: term()) ->
-    {ok, State :: #state{}} | {ok, State :: #state{}, timeout() | hibernate} |
+    {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
     {stop, Reason :: term()} | ignore).
 init([]) ->
     {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
@@ -75,13 +76,13 @@ init([]) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-    State :: #state{}) ->
-    {reply, Reply :: term(), NewState :: #state{}} |
-    {reply, Reply :: term(), NewState :: #state{}, timeout() | hibernate} |
-    {noreply, NewState :: #state{}} |
-    {noreply, NewState :: #state{}, timeout() | hibernate} |
-    {stop, Reason :: term(), Reply :: term(), NewState :: #state{}} |
-    {stop, Reason :: term(), NewState :: #state{}}).
+    State :: state()) ->
+    {reply, Reply :: term(), NewState :: state()} |
+    {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
+    {noreply, NewState :: state()} |
+    {noreply, NewState :: state(), timeout() | hibernate} |
+    {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
+    {stop, Reason :: term(), NewState :: state()}).
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
@@ -92,10 +93,10 @@ handle_call(_Request, _From, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: #state{}) ->
-    {noreply, NewState :: #state{}} |
-    {noreply, NewState :: #state{}, timeout() | hibernate} |
-    {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_cast(Request :: term(), State :: state()) ->
+    {noreply, NewState :: state()} |
+    {noreply, NewState :: state(), timeout() | hibernate} |
+    {stop, Reason :: term(), NewState :: state()}).
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -109,10 +110,10 @@ handle_cast(_Request, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: #state{}) ->
-    {noreply, NewState :: #state{}} |
-    {noreply, NewState :: #state{}, timeout() | hibernate} |
-    {stop, Reason :: term(), NewState :: #state{}}).
+-spec(handle_info(Info :: timeout() | term(), State :: state()) ->
+    {noreply, NewState :: state()} |
+    {noreply, NewState :: state(), timeout() | hibernate} |
+    {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, active_view := ActiveView}},
     State0 = #state{hyparview_event_ref = EventRef}) ->
     State1 = State0#state{active_view = ActiveView},
@@ -140,7 +141,7 @@ handle_info(_Info, State) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-    State :: #state{}) -> term()).
+    State :: state()) -> term()).
 terminate(_Reason, _State) ->
     ok.
 
@@ -152,9 +153,9 @@ terminate(_Reason, _State) ->
 %% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
     Extra :: term()) ->
-    {ok, NewState :: #state{}} | {error, Reason :: term()}).
+    {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 

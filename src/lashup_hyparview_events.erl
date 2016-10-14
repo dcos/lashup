@@ -28,6 +28,7 @@
 -define(SERVER, ?MODULE).
 
 -record(state, {pid, reference, active_view = ordsets:new(), passive_view = ordsets:new()}).
+-type state() :: #state{}.
 
 %%%===================================================================
 %%% gen_event callbacks
@@ -85,8 +86,8 @@ event_mgr_ref(Node) ->
 %% @end
 %%--------------------------------------------------------------------
 -spec(init(InitArgs :: term()) ->
-  {ok, State :: #state{}} |
-  {ok, State :: #state{}, hibernate} |
+  {ok, State :: state()} |
+  {ok, State :: state(), hibernate} |
   {error, Reason :: term()}).
 init(State0) ->
   ActiveView = lashup_hyparview_membership:get_active_view(),
@@ -104,10 +105,10 @@ init(State0) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_event(Event :: term(), State :: #state{}) ->
-  {ok, NewState :: #state{}} |
-  {ok, NewState :: #state{}, hibernate} |
-  {swap_handler, Args1 :: term(), NewState :: #state{},
+-spec(handle_event(Event :: term(), State :: state()) ->
+  {ok, NewState :: state()} |
+  {ok, NewState :: state(), hibernate} |
+  {swap_handler, Args1 :: term(), NewState :: state(),
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   remove_handler).
 handle_event({ingest, ActiveView1, PassiveView1},
@@ -125,10 +126,10 @@ handle_event({ingest, ActiveView1, PassiveView1},
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), State :: #state{}) ->
-  {ok, Reply :: term(), NewState :: #state{}} |
-  {ok, Reply :: term(), NewState :: #state{}, hibernate} |
-  {swap_handler, Reply :: term(), Args1 :: term(), NewState :: #state{},
+-spec(handle_call(Request :: term(), State :: state()) ->
+  {ok, Reply :: term(), NewState :: state()} |
+  {ok, Reply :: term(), NewState :: state(), hibernate} |
+  {swap_handler, Reply :: term(), Args1 :: term(), NewState :: state(),
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   {remove_handler, Reply :: term()}).
 handle_call(_Request, State) ->
@@ -144,10 +145,10 @@ handle_call(_Request, State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(handle_info(Info :: term(), State :: #state{}) ->
-  {ok, NewState :: #state{}} |
-  {ok, NewState :: #state{}, hibernate} |
-  {swap_handler, Args1 :: term(), NewState :: #state{},
+-spec(handle_info(Info :: term(), State :: state()) ->
+  {ok, NewState :: state()} |
+  {ok, NewState :: state(), hibernate} |
+  {swap_handler, Args1 :: term(), NewState :: state(),
     Handler2 :: (atom() | {atom(), Id :: term()}), Args2 :: term()} |
   remove_handler).
 
@@ -178,9 +179,9 @@ terminate(_Arg, _State) ->
 %%
 %% @end
 %%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: #state{},
+-spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
   Extra :: term()) ->
-  {ok, NewState :: #state{}}).
+  {ok, NewState :: state()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 

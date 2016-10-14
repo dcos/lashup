@@ -8,7 +8,7 @@
 
 
 %% Internal APIs
--export([init/1, code_change/4, terminate/3]).
+-export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
 -export([rx_sync/3, idle/3]).
 
@@ -24,11 +24,13 @@ start_link(Node, RemotePID) ->
 init([Node, RemotePid]) ->
     MonitorRef = monitor(process, RemotePid),
     StateData = #state{node = Node, monitor_ref = MonitorRef, remote_pid = RemotePid},
-    {state_functions, rx_sync, StateData, []}.
+    {ok, rx_sync, StateData, []}.
 
+callback_mode() ->
+    state_functions.
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
-    {state_functions, OldState, OldData}.
+    {ok, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
     lager:warning("KV AAE terminated (~p): ~p", [State, Reason]).

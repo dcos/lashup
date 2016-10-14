@@ -250,11 +250,10 @@ handle_info(DownMessage = {'DOWN', _, _, _, _}, State) ->
 %% In fact, the network can get into (healthy) cases where it's not possible
 %% Like running fewer than the active view size count nodes
 %% So, only neighbor if more than 25% of our active view is open.
-handle_info(maybe_neighbor, State = #state{active_view = ActiveView, active_view_size = ACTIVE_VIEW_SIZE})
-    when length(ActiveView) >= ACTIVE_VIEW_SIZE * 0.75 ->
+handle_info(maybe_neighbor, State0) when length(State0#state.active_view) >= State0#state.active_view_size * 0.75 ->
   %% Ignore this, because my active view is full
   reschedule_maybe_neighbor(),
-  State1 = State#state{unfilled_active_set_count = 0},
+  State1 = State0#state{unfilled_active_set_count = 0},
   {noreply, check_state(State1)};
 handle_info(maybe_neighbor, State) ->
   lager:debug("Maybe neighbor triggered"),
