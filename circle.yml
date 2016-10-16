@@ -33,8 +33,13 @@ test:
     - ./rebar3 dialyzer
     - ./elvis rock
     - ./rebar3 edoc
+    - ./rebar3 cover
   post:
+    - ./rebar3 covertool generate
+    - sudo pip install codecov
     - mkdir -p $CIRCLE_TEST_REPORTS/
+    - mv TEST-*.xml $CIRCLE_TEST_REPORTS
     - mkdir -p $CIRCLE_ARTIFACTS
-    - cp -r _build/test $CIRCLE_TEST_REPORTS
+    - codecov -X gcov -f _build/test/covertool/lashup.covertool.xml
+    - cp -r _build/test/cover $CIRCLE_TEST_REPORTS
     - cp -r doc $CIRCLE_ARTIFACTS
