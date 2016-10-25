@@ -429,13 +429,13 @@ trim_edges(Node, Dsts) ->
   length(Deleted).
 
 neighbors(Node) ->
-  DstsEdges = ets:lookup(edges, Node),
-  Dsts = [Edge#edge.dst || Edge <- DstsEdges],
-  %% We ordset it to:
+  %% Ets lookup should _always_ return in order.
+  %% This means we do not need to ordset, since ets already does:
   %% (1) Dedupe (which shouldn't happen
   %% (2) Sort the list, because it ensure we always take the same path ("smallest") when building the BFS
   %%      since we add the nodes in order
-  ordsets:from_list(Dsts).
+  DstsEdges = ets:lookup(edges, Node),
+  [Edge#edge.dst || Edge <- DstsEdges].
 
 -spec(persist_node(Node :: node()) -> boolean()).
 persist_node(Node) ->
