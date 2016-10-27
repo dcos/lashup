@@ -76,6 +76,27 @@ insert_graph(N, Tuple) ->
 
 benchmark(_Config) ->
     Graph = generate_graph(1000),
+    %eprof:start(),
+    %eprof:start_profiling([whereis(lashup_gm_route)]),
+    %fprof:start(),
     insert_graph(1, Graph),
-    {Val, _} = timer:tc(lashup_gm_route, get_tree, [{node, 10}]),
+    %fprof:trace([start, {file, "fprof.trace"}, verbose, {procs, [whereis(lashup_gm_route)]}]),
+    {Val, _} = timer:tc(lashup_gm_route, get_tree, [{node, 10}, 50000]),
+    lashup_gm_route:update_node(foo, [1]),
+    lashup_gm_route:get_tree({node, 10}, 50000),
+    lashup_gm_route:update_node(foo, [2]),
+    lashup_gm_route:get_tree({node, 10}, 50000),
+    lashup_gm_route:update_node(foo, [1]),
+    lashup_gm_route:get_tree({node, 10}, 50000),
+    lashup_gm_route:update_node(foo, [2]),
+    lashup_gm_route:get_tree({node, 10}, 50000),
+    lashup_gm_route:update_node(foo, [1]),
+    lashup_gm_route:get_tree({node, 10}, 50000),
+    %fprof:trace([stop]),
+    %fprof:profile({file, "fprof.trace"}),
     ct:pal("Time: ~p", [Val]).
+    %fprof:analyse([totals, {dest, "fprof.analysis"}]).
+
+% eprof:stop_profiling(),
+   % eprof:log("eprof.log"),
+   % eprof:analyze().
