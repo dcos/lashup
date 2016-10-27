@@ -95,8 +95,8 @@ handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteClock = {_RemoteEpoc
 
 send_event(Pid, Member) ->
   UpdatedNode = to_event(Member),
-  CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
-  erlang:send(Pid, {event, CompressedTerm}, [noconnect]).
+  BinaryTerm = term_to_binary(UpdatedNode),
+  erlang:send(Pid, {event, BinaryTerm}, [noconnect]).
 
 
 send_member(Node, _State = #state{fanout_pid = Pid}) ->
@@ -105,8 +105,8 @@ send_member(Node, _State = #state{fanout_pid = Pid}) ->
       ok;
     [Member] ->
       UpdatedNode = to_event(Member),
-      CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
-      erlang:send(Pid, {event, CompressedTerm}, [noconnect])
+      BinaryTerm = term_to_binary(UpdatedNode),
+      erlang:send(Pid, {event, BinaryTerm}, [noconnect])
   end.
 
 
