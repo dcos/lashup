@@ -123,7 +123,7 @@ init([]) ->
   %% TODO: Add jitter
   MyPid = self(),
   spawn_link(fun() -> update_node_backoff_loop(5000, MyPid) end),
-  ets:new(members, [ordered_set, named_table, {keypos, #member.node}, compressed]),
+  ets:new(members, [ordered_set, named_table, {keypos, #member2.node}]),
   {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
   State = #state{epoch = new_epoch(), hyparview_event_ref = HyparviewEventsRef},
   init_node(State),
@@ -334,11 +334,9 @@ new_value(_State = #state{active_view = ActiveView, epoch = Epoch}) ->
 init_node(State) ->
   LocalUpdate = erlang:system_time(nano_seconds),
   Value = new_value(State),
-  ClockDelta = 0,
-  Member = #member{
+  Member = #member2{
     node = node(),
-    locally_updated_at = [LocalUpdate],
-    clock_deltas = [ClockDelta],
+    last_heard = LocalUpdate,
     value = Value,
     active_view = maps:get(active_view, Value)
   },
@@ -384,10 +382,9 @@ store_and_forward_new_updated_node(From,
     value := Value
   }, State) ->
   LocalUpdate = erlang:monotonic_time(nano_seconds),
-
-  Member = #member{
+  Member = #member2{
     node = Node,
-    locally_updated_at = [LocalUpdate],
+    last_heard = LocalUpdate,
     value = Value,
     active_view = maps:get(active_view, Value)
   },
@@ -400,7 +397,7 @@ store_and_forward_new_updated_node(From,
 maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{value := RemoteValue}, State) ->
   %% Should be true, if the remote one is newer
   #{epoch := RemoteEpoch, clock := RemoteClock} = RemoteValue,
-  #{epoch := LocalEpoch, clock := LocalClock} = Member#member.value,
+  #{epoch := LocalEpoch, clock := LocalClock} = Member#member2.value,
   case {RemoteEpoch, RemoteClock} > {LocalEpoch, LocalClock}  of
     true ->
       store_and_forward_updated_node(Member, From, UpdatedNode, State);
@@ -411,7 +408,7 @@ maybe_store_store_and_forward_updated_node(Member, From, UpdatedNode = #{value :
   State.
 
 store_and_forward_updated_node(Member, From, _UpdatedNode, _State)
-    when Member#member.node == node() andalso From =/= node() ->
+    when Member#member2.node == node() andalso From =/= node() ->
   ok;
 store_and_forward_updated_node(Member, From,
   UpdatedNode = #{
@@ -426,9 +423,8 @@ store_and_forward_updated_node(Member, From,
 %% The value is gauranteed to be bigger than the one we have now
 update_local_member(Value, Member, State) ->
   Now = erlang:monotonic_time(nano_seconds),
-  NewLocallyUpdatedAt = lists:sublist([Now | Member#member.locally_updated_at], 100),
-  NewMember = Member#member{
-    locally_updated_at = NewLocallyUpdatedAt,
+  NewMember = Member#member2{
+    last_heard = Now,
     value = Value,
     active_view = maps:get(active_view, Value)
   },
@@ -440,7 +436,8 @@ forward(_NewUpdatedNode = #{ttl := TTL}, _State) when TTL =< 0 ->
   ok;
 forward(NewUpdatedNode = #{ttl := TTL}, _State = #state{subscribers = Subscribers}) ->
   NewUpdatedNode1 = NewUpdatedNode#{ttl := TTL - 1},
-  CompressedTerm = term_to_binary(NewUpdatedNode1, [compressed]),
+  %% This should be small enough, no need to compress
+  CompressedTerm = term_to_binary(NewUpdatedNode1),
   Fun =
     fun(_Subscriber = #subscriber{pid = Pid}) ->
       erlang:send(Pid, {event, CompressedTerm}, [noconnect])
@@ -460,12 +457,12 @@ get_membership() ->
 
 accumulate_membership(Member, Acc) ->
   Now = erlang:monotonic_time(),
-  [LastHeard | _] = Member#member.locally_updated_at,
+  LastHeard = Member#member2.last_heard,
   TimeSinceLastHeard = erlang:convert_time_unit(Now - LastHeard, native, milli_seconds),
   Node = #{
-    node => Member#member.node,
+    node => Member#member2.node,
     time_since_last_heard => TimeSinceLastHeard,
-    active_view => Member#member.active_view
+    active_view => Member#member2.active_view
   },
   [Node | Acc].
 
@@ -473,8 +470,8 @@ trim_nodes(State) ->
   Now = erlang:monotonic_time(),
   Delta = erlang:convert_time_unit(86400, seconds, native),
   MatchSpec = ets:fun2ms(
-    fun(Member = #member{locally_updated_at = LocallyUpdatedAt})
-      when Now - hd(LocallyUpdatedAt) > Delta andalso Member#member.node =/= node()
+    fun(Member = #member2{last_heard = LastHeard})
+      when Now - LastHeard > Delta andalso Member#member2.node =/= node()
       -> Member
     end
   ),
@@ -503,10 +500,10 @@ prune_subscriptions(MonitorRef, State = #state{subscriptions = Subscription}) ->
 %% it's less new member, but more a change in another member
 
 %% @end
--spec(process_new_member(MemberOld :: member(), MemberNew :: member(), State :: state()) -> ok).
+-spec(process_new_member(MemberOld :: member2(), MemberNew :: member2(), State :: state()) -> ok).
 process_new_member(Member, NewMember, _State = #state{active_view = HyparViewActiveView}) ->
-  ActiveView1 = Member#member.active_view,
-  ActiveView2 = NewMember#member.active_view,
+  ActiveView1 = Member#member2.active_view,
+  ActiveView2 = NewMember#member2.active_view,
   ActiveView1Set = ordsets:from_list(ActiveView1),
   ActiveView2Set = ordsets:from_list(ActiveView2),
   RetiredMembersSet = ordsets:subtract(ActiveView1Set, ActiveView2Set),
@@ -517,9 +514,9 @@ process_new_member(Member, NewMember, _State = #state{active_view = HyparViewAct
 
 handle_get_neighbor_recommendations(ActiveViewSize) ->
   MatchSpec = ets:fun2ms(
-    fun(Member = #member{active_view = ActiveView})
-      when length(ActiveView) < ActiveViewSize andalso Member#member.node =/= node()
-      -> Member#member.node
+    fun(Member = #member2{active_view = ActiveView})
+      when length(ActiveView) < ActiveViewSize andalso Member#member2.node =/= node()
+      -> Member#member2.node
     end
   ),
   case ets:select(members, MatchSpec, 100) of
@@ -531,17 +528,17 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
   end.
 
 %% ETS write functions
-delete(Member = #member{}, _State) ->
-  lashup_gm_route:delete_node(Member#member.node),
-  ets:delete(members, Member#member.node).
+delete(Member = #member2{}, _State) ->
+  lashup_gm_route:delete_node(Member#member2.node),
+  ets:delete(members, Member#member2.node).
 
 
 %% TODO:
 %% Rewrite both
--spec(persist(Member :: member(), State :: state()) -> ok).
+-spec(persist(Member :: member2(), State :: state()) -> ok).
 persist(Member, _State) ->
-  lashup_gm_route:update_node(Member#member.node, Member#member.active_view),
-  case ets:lookup(members, Member#member.node) of
+  lashup_gm_route:update_node(Member#member2.node, Member#member2.active_view),
+  case ets:lookup(members, Member#member2.node) of
     [OldMember] ->
       ets:insert(members, Member),
       lashup_gm_events:ingest(OldMember, Member);

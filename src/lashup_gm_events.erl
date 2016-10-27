@@ -40,13 +40,13 @@
 %%% gen_event callbacks
 %%%===================================================================
 
--spec(ingest(member(), member()) -> ok).
+-spec(ingest(member2(), member2()) -> ok).
 ingest(OldMember, NewMember) ->
   gen_event:notify(?SERVER, {ingest, OldMember, NewMember}),
   ok.
 
 
--spec(ingest(member()) -> ok).
+-spec(ingest(member2()) -> ok).
 ingest(Member) ->
   gen_event:notify(?SERVER, {ingest, Member}),
   ok.
@@ -209,14 +209,14 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec(handle_ingest(member(), state()) -> ok).
-handle_ingest(Member = #member{}, _State = #state{reference = Reference, pid = Pid}) ->
+-spec(handle_ingest(member2(), state()) -> ok).
+handle_ingest(Member = #member2{}, _State = #state{reference = Reference, pid = Pid}) ->
   Event = #{type => new_member, member => Member, ref => Reference},
   Pid ! {?MODULE, Event},
   ok.
 
--spec(handle_ingest(member(), member(), state()) -> ok).
-handle_ingest(OldMember = #member{}, NewMember = #member{},
+-spec(handle_ingest(member2(), member2(), state()) -> ok).
+handle_ingest(OldMember = #member2{}, NewMember = #member2{},
     _State = #state{reference = Reference, pid = Pid}) ->
   Event = #{type => member_change, old_member => OldMember, member => NewMember, ref => Reference},
   Pid ! {?MODULE, Event},
