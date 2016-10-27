@@ -69,13 +69,10 @@
 
 %% Egress paths = active view
 -record(vertex, {
-  node = erlang:error() :: node()
+  node = erlang:error() :: node(),
+  dsts = ordsets:new() :: ordsets:ordset(node())
 }).
 
--record(edge, {
-  src = erlang:error() :: node(),
-  dst = erlang:error() :: node()
-}).
 -record(tree_entry, {
   parent = undefined :: node() | undefined,
   distance = infinity :: non_neg_integer() | infinity
@@ -103,8 +100,7 @@
 %% @end
 -spec(update_node(Node :: node(), Dsts :: [node()]) -> ok).
 update_node(Node, Dsts)  ->
-  DstsSet = ordsets:from_list(Dsts),
-  gen_server:cast(?SERVER, {update_node, Node, DstsSet}).
+  gen_server:cast(?SERVER, {update_node, Node, Dsts}).
 
 -spec(delete_node(Node :: node()) -> ok).
 delete_node(Node) ->
@@ -258,7 +254,6 @@ start_link() ->
 init([]) ->
   tree_cache = ets:new(tree_cache, [set, named_table, {read_concurrency, true}, {keypos, #tree_cache.root}]),
   vertices = ets:new(vertices, [set, named_table, {keypos, #vertex.node}]),
-  edges = ets:new(edges, [bag, named_table, {keypos, #edge.src}]),
   {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -384,7 +379,7 @@ handle_update_node(Node, Dsts, State) ->
   %% We only bust the caches is the adjacency list has changed.
   %% Once we have properties on adjacencies and vertices,
   %% We have to augment this
-  case Dsts of
+  case Dsts1 of
     InitialNeighbors ->
       State;
     _ ->
@@ -392,13 +387,24 @@ handle_update_node(Node, Dsts, State) ->
   end.
 
 -spec(handle_delete_node(Node ::node(), State :: state()) -> state()).
-handle_delete_node(Node, State) ->
+handle_delete_node(Node, State0) ->
   ets:delete(vertices, Node),
-  MatchSpec1 = ets:fun2ms(fun(#edge{dst = Dst}) when Dst == Node -> true end),
-  ets:select_delete(edges, MatchSpec1),
-  MatchSpec2 = ets:fun2ms(fun(#edge{src = Src}) when Src == Node -> true end),
-  ets:select_delete(edges, MatchSpec2),
-  increment_cache_version(State).
+  State1 = increment_cache_version(State0),
+  handle_delete_node(Node, ets:first(vertices), State1).
+
+
+-spec(handle_delete_node(DstNode :: node(), CurNode :: node() | '$end_of_table', State :: state()) -> state()).
+handle_delete_node(_DstNode, '$end_of_table', State) -> State;
+handle_delete_node(DstNode, CurNode, State) ->
+  Dsts0 = ets:lookup_element(vertices, CurNode, #vertex.dsts),
+  case ordsets:del_element(DstNode, Dsts0) of
+    Dsts0 ->
+      State;
+    Dsts1 ->
+      ets:update_element(vertices, CurNode, {#vertex.dsts, Dsts1})
+  end,
+  handle_delete_node(DstNode, ets:next(vertices, CurNode), State).
+
 
 -spec(increment_cache_version(State :: state()) -> state()).
 increment_cache_version(State = #state{cache_version = CV}) ->
@@ -411,22 +417,7 @@ bust_cache(_State = #state{cache_version = CacheVersion}) ->
   ets:select_delete(tree_cache, MatchSpec).
 
 update_edges(Node, Dsts) ->
-  add_new_edges(Node, Dsts),
-  trim_edges(Node, Dsts).
-
--spec(add_new_edges(Node :: node(), Dsts :: [node()]) -> ok).
-add_new_edges(Node, Dsts) ->
-  NewEdgeRecords = [#edge{src = Node, dst = Dst} || Dst <- Dsts],
-  [true = ets:insert(edges, NewEdgeRecord) || NewEdgeRecord <- NewEdgeRecords],
-  ok.
-
--spec(trim_edges(Node :: node(), Dsts :: [node()]) -> non_neg_integer()).
-trim_edges(Node, Dsts) ->
-  Old = neighbors(Node),
-  NeighborsToDelete = ordsets:subtract(Old, Dsts),
-  EdgesToDelete = [#edge{src = Node, dst = Neighbor} || Neighbor <- NeighborsToDelete],
-  Deleted = [ets:delete_object(edges, Edge) || Edge <- EdgesToDelete],
-  length(Deleted).
+  true = ets:update_element(vertices, Node, {#vertex.dsts, Dsts}).
 
 neighbors(Node) ->
   %% Ets lookup should _always_ return in order.
@@ -434,8 +425,11 @@ neighbors(Node) ->
   %% (1) Dedupe (which shouldn't happen
   %% (2) Sort the list, because it ensure we always take the same path ("smallest") when building the BFS
   %%      since we add the nodes in order
-  DstsEdges = ets:lookup(edges, Node),
-  [Edge#edge.dst || Edge <- DstsEdges].
+  case ets:lookup(vertices, Node) of
+    [] -> [];
+    [Vertex] ->
+      Vertex#vertex.dsts
+  end.
 
 -spec(persist_node(Node :: node()) -> boolean()).
 persist_node(Node) ->
