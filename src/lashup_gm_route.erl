@@ -30,7 +30,8 @@
   path_to/1,
   path_to/2,
   children/2,
-  prune_tree/2
+  prune_tree/2,
+  flush_events_helper/0
 ]).
 
 
@@ -60,7 +61,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(state, {cache_version = 0 :: non_neg_integer()}).
+-record(state, {cache_version = 0 :: non_neg_integer(), lashup_gm_routes_events_helper :: pid()}).
 -type state() :: state().
 
 -type distance() :: non_neg_integer() | infinity.
@@ -221,6 +222,8 @@ prune_tree(Node, Tree, PrunedTree) ->
       prune_tree(Parent, Tree, PrunedTree1)
   end.
 
+flush_events_helper() ->
+  gen_server:cast(?SERVER, flush_events_helper).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -254,7 +257,8 @@ start_link() ->
 init([]) ->
   tree_cache = ets:new(tree_cache, [set, named_table, {read_concurrency, true}, {keypos, #tree_cache.root}]),
   vertices = ets:new(vertices, [set, named_table, {keypos, #vertex.node}]),
-  {ok, #state{}}.
+  EventsHelper = spawn_link(fun advertise_tree/0),
+  {ok, #state{lashup_gm_routes_events_helper = EventsHelper}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -294,6 +298,9 @@ handle_call(_Request, _From, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_cast(flush_events_helper, State = #state{lashup_gm_routes_events_helper = EH}) ->
+  EH ! flush,
+  {noreply, State};
 handle_cast({update_node, Node, Dsts}, State) ->
   State1 = handle_update_node(Node, Dsts, State),
   {noreply, State1};
@@ -334,7 +341,8 @@ handle_info(_Info, State) ->
 %%--------------------------------------------------------------------
 -spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
   State :: state()) -> term()).
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{lashup_gm_routes_events_helper = EV}) ->
+  exit(EV, normal),
   ok.
 
 %%--------------------------------------------------------------------
@@ -412,7 +420,8 @@ increment_cache_version(State = #state{cache_version = CV}) ->
   bust_cache(State1),
   State1.
 
-bust_cache(_State = #state{cache_version = CacheVersion}) ->
+bust_cache(_State = #state{cache_version = CacheVersion, lashup_gm_routes_events_helper = EV}) ->
+  EV ! bust_cache,
   MatchSpec = ets:fun2ms(fun(#tree_cache{cache_ver = CV}) when CV =/= CacheVersion -> true end),
   ets:select_delete(tree_cache, MatchSpec).
 
@@ -437,21 +446,15 @@ persist_node(Node) ->
   ets:insert_new(vertices, Vertex).
 
 -spec(fetch_tree_from_cache(Node :: node()) -> {tree, tree()} | false).
-fetch_tree_from_cache(Node) when Node == node()->
-  case ets:lookup(tree_cache, Node) of
-    [TreeCache] ->
-      {tree, TreeCache#tree_cache.tree};
-    [] ->
-      false
-  end;
 fetch_tree_from_cache(Node) ->
-  case ets:lookup(tree_cache, Node) of
+  case catch ets:lookup(tree_cache, Node) of
     [TreeCache] ->
       {tree, TreeCache#tree_cache.tree};
     [] ->
+      false;
+    _ ->
       false
   end.
-
 
 %% @doc
 %% Checks to ensure that the tree is cache coherent
@@ -531,6 +534,69 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
     _ ->
       {Queue, Tree}
   end.
+
+-record(event_window, {second = erlang:monotonic_time(seconds), events_received = 0}).
+
+advertise_tree() ->
+  advertise_tree(undefined, #event_window{}).
+
+advertise_tree(OldTree, EventWindow) ->
+  Now = erlang:monotonic_time(seconds),
+  case EventWindow of
+    %% We've exceeded 10 events in the past second, wait
+    #event_window{second = Now, events_received = ER} when ER > 10 ->
+      lager:warning("lashup_gm_route going into busy wait"),
+      busy_wait(OldTree, EventWindow);
+    %% We're still in the last second, increment the count, and wait for tree advertisement
+    #event_window{second = Now, events_received = ER} ->
+      wait_for_tree(OldTree, EventWindow#event_window{events_received = ER + 1});
+    %% Else, reset the window
+    #event_window{second = Second} when Now > Second ->
+      advertise_tree(OldTree, #event_window{})
+  end.
+
+%% This calculates the time until the next "window"
+busy_wait(OldTree, EventWindow) ->
+  NowMS = erlang:monotonic_time(milli_seconds),
+  NowSeconds = erlang:convert_time_unit(NowMS, milli_seconds, seconds),
+  NextSecondInMS = erlang:convert_time_unit(NowSeconds + 1, seconds, milli_seconds),
+  MSUntilNextSecond = NextSecondInMS - NowMS,
+  timer:sleep(MSUntilNextSecond + 1),
+  flush_messages(),
+  self() ! flush,
+  lager:info("lashup_gm_route finishing busy_wait"),
+  advertise_tree(OldTree, EventWindow).
+
+flush_messages() ->
+  receive
+    _ ->
+      flush_messages()
+  after 1 ->
+    ok
+  end.
+
+%% Either wait for a bust cache event, or a forced tree regen
+wait_for_tree(OldTree, EventWindow) ->
+  receive
+    bust_cache ->
+      wait_for_tree2(OldTree, EventWindow);
+    flush ->
+      %% Something needs the tree right now, we set the tree to undefined to force it to send
+      wait_for_tree2(undefined, EventWindow)
+  end.
+
+wait_for_tree2(OldTree, EventWindow) ->
+  NewTree =
+    case get_tree(node(), infinity) of
+      false ->
+        OldTree;
+      {tree, OldTree} ->
+        OldTree;
+      {tree, Else} ->
+        lashup_gm_route_events:ingest(Else),
+        Else
+  end,
+  advertise_tree(NewTree, EventWindow).
 
 
 -ifdef(TEST).

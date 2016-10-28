@@ -37,6 +37,7 @@ init([]) ->
     ?CHILD(lashup_gm_events, worker),
     ?CHILD(lashup_gm_route, worker),
     ?CHILD(lashup_gm, worker),
+    ?CHILD(lashup_gm_route_events, worker),
     ?CHILD(lashup_gm_probe, worker),
     ?CHILD(lashup_gm_mc_sup, supervisor)
   ]} }.

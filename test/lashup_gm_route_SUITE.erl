@@ -16,15 +16,18 @@
 -export([init_per_testcase/2, end_per_testcase/2]).
 
 %% Testcases
--export([benchmark/1]).
+-export([benchmark/1, basic_events/1, busy_wait_events/1]).
 
-all() -> [benchmark].
+all() -> [benchmark, basic_events, busy_wait_events].
 
 init_per_testcase(_TestCase, Config) ->
-    {ok, _Pid} = lashup_gm_route:start_link(),
+    application:ensure_all_started(lager),
+    {ok, _} = lashup_gm_route:start_link(),
+    {ok, _} = lashup_gm_route_events:start_link(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
+    gen_event:stop(lashup_gm_route_events),
     lashup_gm_route:stop().
 
 %% Create a list of X nodes
@@ -100,3 +103,32 @@ benchmark(_Config) ->
 % eprof:stop_profiling(),
    % eprof:log("eprof.log"),
    % eprof:analyze().
+
+basic_events(_Config) ->
+    lashup_gm_route:update_node(node(), [1]),
+    lashup_gm_route:update_node(500, [150]),
+    lashup_gm_route:update_node(500, [200]),
+    {ok, Ref} = lashup_gm_route_events:subscribe(),
+    true = (count_events(Ref) > 0),
+    lashup_gm_route:update_node(500, [150]),
+    0 = count_events(Ref).
+
+count_events(Ref) -> count_events(Ref, 0).
+
+count_events(Ref, Acc) ->
+    receive
+        {lashup_gm_route_events, _Event = #{ref := Ref}} ->
+            count_events(Ref, Acc + 1)
+        after 500 ->
+            Acc
+    end.
+
+busy_wait_events(_Config) ->
+    lashup_gm_route:update_node(node(), [1]),
+    {ok, Ref} = lashup_gm_route_events:subscribe(),
+    lists:foreach(fun(X) -> lashup_gm_route:update_node(1, [X]) end, lists:seq(1, 50)),
+    true = (count_events(Ref) < 20),
+    timer:sleep(2000),
+    lashup_gm_route:update_node(node(), [1, 2]),
+    Num = count_events(Ref),
+    true = (Num < 5) andalso (Num > 0).
