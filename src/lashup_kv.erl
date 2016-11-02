@@ -230,7 +230,7 @@ init_db(Nodes) ->
   Tables = [kv],
   TablesToCreate = Tables -- ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Tables, 5000).
+  ok = mnesia:wait_for_tables(Tables, 60000).
 
 create_table(kv) ->
   {atomic, ok} =  mnesia:create_table(kv, [
