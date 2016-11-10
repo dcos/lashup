@@ -60,13 +60,13 @@
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, Op) ->
-  gen_server:call(?SERVER, {op, Key, Op}).
+  gen_server:call(?SERVER, {op, Key, Op}, infinity).
 
 
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  gen_server:call(?SERVER, {op, Key, VClock, Op}).
+  gen_server:call(?SERVER, {op, Key, VClock, Op}, infinity).
 
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
