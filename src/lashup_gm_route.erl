@@ -14,7 +14,9 @@
 -module(lashup_gm_route).
 -author("sdhillon").
 
--behaviour(gen_server).
+%-compile(inline).
+
+-behaviour(gen_statem).
 
 %% API
 -export([
@@ -29,6 +31,7 @@
   unreachable_nodes/1,
   path_to/1,
   path_to/2,
+  reverse_children/2,
   children/2,
   prune_tree/2,
   flush_events_helper/0
@@ -40,7 +43,8 @@
 
 -export([proper/0]).
 
--export([initial_state/0,
+-export([
+  initial_state/0,
   stop/0,
   command/1,
   precondition/2,
@@ -51,17 +55,22 @@
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
-%% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+%% gen_statem callbacks
+-export([
+  init/1,
+  terminate/3,
+  code_change/4,
+  callback_mode/0,
+  handle_event/4
+]).
+
 
 -define(SERVER, ?MODULE).
 
--record(state, {cache_version = 0 :: non_neg_integer(), lashup_gm_routes_events_helper :: pid()}).
+-record(state, {
+  events = 0 :: non_neg_integer(),
+  cache = #{} :: #{node() => tree()}
+}).
 -type state() :: state().
 
 -type distance() :: non_neg_integer() | infinity.
@@ -76,15 +85,9 @@
 
 -record(tree_entry, {
   parent = undefined :: node() | undefined,
-  distance = infinity :: non_neg_integer() | infinity
+  distance = infinity :: non_neg_integer() | infinity,
+  children = ordsets:new() :: ordsets:ordset(node())
 }).
-
--record(tree_cache, {
-  root = erlang:error() :: node(),
-  tree = erlang:error() :: tree(),
-  cache_ver = erlang:error() :: non_neg_integer()
-}).
-
 
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -101,11 +104,11 @@
 %% @end
 -spec(update_node(Node :: node(), Dsts :: [node()]) -> ok).
 update_node(Node, Dsts)  ->
-  gen_server:cast(?SERVER, {update_node, Node, Dsts}).
+  gen_statem:cast(?SERVER, {update_node, Node, Dsts}).
 
 -spec(delete_node(Node :: node()) -> ok).
 delete_node(Node) ->
-  gen_server:cast(?SERVER, {delete_node, Node}).
+  gen_statem:cast(?SERVER, {delete_node, Node}).
 
 %% @doc
 %% Checks the reachability from this node to node Node
@@ -113,7 +116,7 @@ delete_node(Node) ->
 -spec(reachable(Node :: node()) -> true | false).
 reachable(Node) when Node == node() -> true;
 reachable(Node) ->
-  case catch get_tree(node()) of
+  case get_tree(node()) of
     {tree, Tree} ->
       distance(Node, Tree) =/= infinity;
     _ ->
@@ -123,7 +126,7 @@ reachable(Node) ->
 
 -spec(path_to(Node :: node()) -> [node()] | false).
 path_to(Node) ->
-  case catch get_tree(node()) of
+  case get_tree(node()) of
     {tree, Tree} ->
       path_to(Node, Tree);
     _ ->
@@ -156,13 +159,7 @@ get_tree(Node) ->
 
 -spec(get_tree(Node :: node(), Timeout :: non_neg_integer() | infinity) -> {tree, tree()} | false).
 get_tree(Node, Timeout) ->
-  case fetch_tree_from_cache(Node) of
-    {tree, Tree} ->
-      {tree, Tree};
-    false ->
-      gen_server:call(?SERVER, {get_tree, Node}, Timeout)
-  end.
-
+  gen_statem:call(?SERVER, {get_tree, Node}, Timeout).
 
 -spec(distance(Node :: node(), Tree :: tree()) -> non_neg_integer() | infinity).
 distance(Node, Tree) ->
@@ -193,8 +190,8 @@ unreachable_nodes(Tree) ->
       Tree),
   maps:keys(TreeEntries).
 
--spec(children(Parent :: node(), Tree :: tree()) -> [node()]).
-children(Parent, Tree) ->
+-spec(reverse_children(Parent :: node(), Tree :: tree()) -> [node()]).
+reverse_children(Parent, Tree) ->
   TreeEntries =
     maps:filter(
       fun(_Node, _TreeEntry = #tree_entry{parent = P, distance = Distance}) ->
@@ -202,6 +199,11 @@ children(Parent, Tree) ->
       end,
       Tree),
   maps:keys(TreeEntries).
+
+-spec(children(Parent :: node(), Tree :: tree()) -> [node()]).
+children(Parent, Tree) ->
+  #{Parent := #tree_entry{children = Children}} = Tree,
+  Children.
 
 %% @doc
 %% Ensures there is a path between the root and the node
@@ -223,7 +225,7 @@ prune_tree(Node, Tree, PrunedTree) ->
   end.
 
 flush_events_helper() ->
-  gen_server:cast(?SERVER, flush_events_helper).
+  gen_statem:cast(?SERVER, flush_events_helper).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -234,130 +236,75 @@ flush_events_helper() ->
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_statem:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %%%===================================================================
-%%% gen_server callbacks
+%%% gen_statem callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%%
-%% @spec init(Args) -> {ok, State} |
-%%                     {ok, State, Timeout} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
--spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
-  {stop, Reason :: term()} | ignore).
 init([]) ->
-  tree_cache = ets:new(tree_cache, [set, named_table, {read_concurrency, true}, {keypos, #tree_cache.root}]),
+  Interval = trunc(200 + rand:uniform(50)),
+  timer:send_interval(Interval, decrement_busy),
   vertices = ets:new(vertices, [set, named_table, {keypos, #vertex.node}]),
-  EventsHelper = spawn_link(fun advertise_tree/0),
-  {ok, #state{lashup_gm_routes_events_helper = EventsHelper}}.
+  {ok, idle, #state{}}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
-handle_call({update_node, Node, Dsts}, _From, State) ->
-  State1 = handle_update_node(Node, Dsts, State),
-  {reply, ok, State1};
-handle_call({get_tree, Root}, _From, State) ->
-  Reply = handle_get_tree(Root, State),
-  {reply, Reply, State};
-handle_call({delete_node, Node}, _From, State) ->
-  State1 = handle_delete_node(Node, State),
-  {reply, ok, State1};
-handle_call(_Request, _From, State) ->
-  {reply, ok, State}.
+callback_mode() ->
+  handle_event_function.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
-handle_cast(flush_events_helper, State = #state{lashup_gm_routes_events_helper = EH}) ->
-  EH ! flush,
-  {noreply, State};
-handle_cast({update_node, Node, Dsts}, State) ->
-  State1 = handle_update_node(Node, Dsts, State),
-  {noreply, State1};
-handle_cast({delete_node, Node}, State) ->
-  State1 = handle_delete_node(Node, State),
-  {noreply, State1};
-handle_cast(Request, State) ->
-  lager:debug("Unknown request: ~p", [Request]),
-  {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @spec handle_info(Info, State) -> {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
-handle_info(_Info, State) ->
-  {noreply, State}.
+%% Get tree logic
+handle_event({call, From}, {get_tree, Node}, cached, StateData0) when Node == node() ->
+  {StateData1, Reply} = handle_get_tree(Node, StateData0),
+  {keep_state, StateData1, {reply, From, Reply}};
+handle_event({call, From}, {get_tree, Node}, _StateName, StateData0 = #state{events = EC}) when Node == node() ->
+  {StateData1, Reply} = handle_get_tree(Node, StateData0),
+  {next_state, cached, StateData1#state{events = EC + 1}, {reply, From, Reply}};
+handle_event({call, From}, {get_tree, Node}, _StateName, StateData0 = #state{events = EC}) ->
+  {StateData1, Reply} = handle_get_tree(Node, StateData0),
+  {keep_state, StateData1#state{events = EC + 1}, {reply, From, Reply}};
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State) -> void()
-%% @end
-%%--------------------------------------------------------------------
--spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
-terminate(_Reason, #state{lashup_gm_routes_events_helper = EV}) ->
-  exit(EV, normal),
+%% Rewrite all other calls into synchronous casts (for testing)
+handle_event({call, From}, EventContent, StateName, StateData0) ->
+  Ret = handle_event(cast, EventContent, StateName, StateData0),
+  gen_statem:reply(From, ok),
+  Ret;
+
+%% Rewrite flush_events message into an advertise message
+handle_event(cast, flush_events_helper, _StateName, _StateData0) ->
+  {keep_state_and_data, [{next_event, internal, maybe_advertise_state}]};
+
+%% Advertisements for cached state are free
+handle_event(internal, maybe_advertise_state, cached, StateData0) ->
+  {StateData1, {tree, Tree}} = handle_get_tree(node(), StateData0),
+  lashup_gm_route_events:ingest(Tree),
+  {keep_state, StateData1};
+handle_event(internal, maybe_advertise_state, _StateName, StateData = #state{events = EC}) when EC > 5 ->
+  %% Ignore that the tree is dirty
+  {next_state, busy, StateData};
+handle_event(internal, maybe_advertise_state, _StateName, StateData0 = #state{events = EC}) ->
+  {StateData1, {tree, Tree}} = handle_get_tree(node(), StateData0),
+  lashup_gm_route_events:ingest(Tree),
+  {next_state, cached, StateData1#state{events = EC + 1}};
+
+handle_event(info, decrement_busy, busy, StateData0 = #state{events = EC}) ->
+  {keep_state, StateData0#state{events = max(0, EC - 1)}, [{next_event, internal, maybe_advertise_state}]};
+handle_event(info, decrement_busy, _, StateData0 = #state{events = EC}) ->
+  {keep_state, StateData0#state{events = max(0, EC - 1)}};
+
+handle_event(cast, {update_node, Node, Dsts}, _StateName, StateData0) ->
+  StateData1 = handle_update_node(Node, Dsts, StateData0),
+  {next_state, dirty_tree, StateData1, [{next_event, internal, maybe_advertise_state}]};
+handle_event(cast, {delete_node, Node}, _StateName, StateData0) ->
+  StateData1 = handle_delete_node(Node, StateData0),
+  {next_state, dirty_tree, StateData1, [{next_event, internal, maybe_advertise_state}]}.
+
+
+terminate(Reason, State, Data = #state{}) ->
+  lager:warning("Terminating in State: ~p, due to reason: ~p, with data: ~p", [State, Reason, Data]),
   ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
-%% @end
-%%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
-  Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
+code_change(_OldVsn, OldState, OldData, _Extra) ->
+  {ok, OldState, OldData}.
 
 %%%===================================================================
 %%% Internal functions
@@ -367,17 +314,19 @@ code_change(_OldVsn, State, _Extra) ->
 %% -Handle short-circuiting updating the tree if we're seeing too many events per second
 %% -Add metrics around tree updates / sec
 
-handle_get_tree(Root, State) ->
-  case fetch_tree_from_cache(Root, State) of
-    {tree, Tree} ->
-      {tree, Tree};
-    false ->
-      maybe_build_and_cache_tree(Root, State)
+-spec(handle_get_tree(Root :: node(), State :: state()) -> {state(), {tree, tree()}}).
+handle_get_tree(Root, State0 = #state{cache = Cache0}) ->
+  case Cache0 of
+    #{Root := Tree} ->
+      {State0, {tree, Tree}};
+    _ ->
+      Tree = build_tree(Root),
+      State1 = State0#state{cache = Cache0#{Root => Tree}},
+      {State1, {tree, Tree}}
   end.
 
-
 -spec(handle_update_node(Node :: node(), Edges :: [node()], State :: state()) -> state()).
-handle_update_node(Node, Dsts, State) ->
+handle_update_node(Node, Dsts, State0) ->
   Dsts1 = lists:usort(Dsts),
   InitialNeighbors = neighbors(Node),
   persist_node(Node),
@@ -389,16 +338,16 @@ handle_update_node(Node, Dsts, State) ->
   %% We have to augment this
   case Dsts1 of
     InitialNeighbors ->
-      State;
+      State0;
     _ ->
-      increment_cache_version(State)
+      bust_cache(State0)
   end.
 
 -spec(handle_delete_node(Node ::node(), State :: state()) -> state()).
 handle_delete_node(Node, State0) ->
   ets:delete(vertices, Node),
-  State1 = increment_cache_version(State0),
-  handle_delete_node(Node, ets:first(vertices), State1).
+  State1 = handle_delete_node(Node, ets:first(vertices), State0),
+  bust_cache(State1).
 
 
 -spec(handle_delete_node(DstNode :: node(), CurNode :: node() | '$end_of_table', State :: state()) -> state()).
@@ -413,17 +362,8 @@ handle_delete_node(DstNode, CurNode, State) ->
   end,
   handle_delete_node(DstNode, ets:next(vertices, CurNode), State).
 
-
--spec(increment_cache_version(State :: state()) -> state()).
-increment_cache_version(State = #state{cache_version = CV}) ->
-  State1 = State#state{cache_version = CV + 1},
-  bust_cache(State1),
-  State1.
-
-bust_cache(_State = #state{cache_version = CacheVersion, lashup_gm_routes_events_helper = EV}) ->
-  EV ! bust_cache,
-  MatchSpec = ets:fun2ms(fun(#tree_cache{cache_ver = CV}) when CV =/= CacheVersion -> true end),
-  ets:select_delete(tree_cache, MatchSpec).
+bust_cache(State0 = #state{}) ->
+  State0#state{cache = #{}}.
 
 update_edges(Node, Dsts) ->
   true = ets:update_element(vertices, Node, {#vertex.dsts, Dsts}).
@@ -445,39 +385,6 @@ persist_node(Node) ->
   Vertex = #vertex{node = Node},
   ets:insert_new(vertices, Vertex).
 
--spec(fetch_tree_from_cache(Node :: node()) -> {tree, tree()} | false).
-fetch_tree_from_cache(Node) ->
-  case catch ets:lookup(tree_cache, Node) of
-    [TreeCache] ->
-      {tree, TreeCache#tree_cache.tree};
-    [] ->
-      false;
-    _ ->
-      false
-  end.
-
-%% @doc
-%% Checks to ensure that the tree is cache coherent
-%% @end
-fetch_tree_from_cache(Node, _State = #state{cache_version = CacheVersion}) ->
-  case ets:lookup(tree_cache, Node) of
-    [TreeCache = #tree_cache{cache_ver = CacheVersion}] ->
-      {tree, TreeCache#tree_cache.tree};
-    [_TreeCache = #tree_cache{}] ->
-      false;
-    [] ->
-      false
-  end.
-
-maybe_build_and_cache_tree(Node, _State = #state{cache_version = CacheVersion}) ->
-  case ets:lookup(vertices, Node) of
-    [] ->
-      false;
-    _ ->
-      Tree = build_tree(Node),
-      ets:insert(tree_cache, #tree_cache{cache_ver = CacheVersion, root = Node, tree = Tree}),
-      {tree, Tree}
-  end.
 
 %% @doc
 %% Build the tree representation for Node = root
@@ -494,6 +401,7 @@ maybe_build_and_cache_tree(Node, _State = #state{cache_version = CacheVersion}) 
 %% Therefore, we have this workaround of stashing the tree in a serialized object
 %% Also, we assume the routing table never grows to more than ~10k nodes
 
+-spec(build_tree(node()) -> tree()).
 build_tree(Node) ->
   Tree = ets:foldl(fun initialize_tree/2, #{}, vertices),
   %% Special case - it's its own parent
@@ -506,10 +414,19 @@ initialize_tree(_Node = #vertex{node = Key}, Tree) ->
   Tree#{Key => #tree_entry{}}.
 
 -spec(update_node(Node :: node(), Parent :: node(), Distance :: distance(), Tree :: tree()) -> tree()).
+%% The exceptional case for the root node
+update_node(Node, Parent, Distance, Tree) when Node == Parent ->
+  Entry0 = maps:get(Node, Tree, #tree_entry{}),
+  Entry1 = Entry0#tree_entry{distance = Distance, parent = Parent},
+  Tree#{Node => Entry1};
 update_node(Node, Parent, Distance, Tree) ->
-  Entry = maps:get(Node, Tree),
-  NewEntry = Entry#tree_entry{distance = Distance, parent = Parent},
-  Tree#{Node => NewEntry}.
+  Entry0 = maps:get(Node, Tree),
+  Entry1 = Entry0#tree_entry{distance = Distance, parent = Parent},
+  ParentEntry0 = #tree_entry{children = Children0} = maps:get(Parent, Tree, #tree_entry{}),
+  Children1 = ordsets:add_element(Node, Children0),
+  ParentEntry1 = ParentEntry0#tree_entry{children = Children1},
+  Tree#{Node => Entry1, Parent => ParentEntry1}.
+  %Tree#{Node => NewEntry}.
 
 
 build_tree(Queue, Tree) ->
@@ -534,70 +451,6 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
     _ ->
       {Queue, Tree}
   end.
-
--record(event_window, {second = erlang:monotonic_time(seconds), events_received = 0}).
-
-advertise_tree() ->
-  advertise_tree(undefined, #event_window{}).
-
-advertise_tree(OldTree, EventWindow) ->
-  Now = erlang:monotonic_time(seconds),
-  case EventWindow of
-    %% We've exceeded 10 events in the past second, wait
-    #event_window{second = Now, events_received = ER} when ER > 10 ->
-      lager:warning("lashup_gm_route going into busy wait"),
-      busy_wait(OldTree, EventWindow);
-    %% We're still in the last second, increment the count, and wait for tree advertisement
-    #event_window{second = Now, events_received = ER} ->
-      wait_for_tree(OldTree, EventWindow#event_window{events_received = ER + 1});
-    %% Else, reset the window
-    #event_window{second = Second} when Now > Second ->
-      advertise_tree(OldTree, #event_window{})
-  end.
-
-%% This calculates the time until the next "window"
-busy_wait(OldTree, EventWindow) ->
-  NowMS = erlang:monotonic_time(milli_seconds),
-  NowSeconds = erlang:convert_time_unit(NowMS, milli_seconds, seconds),
-  NextSecondInMS = erlang:convert_time_unit(NowSeconds + 1, seconds, milli_seconds),
-  MSUntilNextSecond = NextSecondInMS - NowMS,
-  timer:sleep(MSUntilNextSecond + 1),
-  flush_messages(),
-  self() ! flush,
-  lager:info("lashup_gm_route finishing busy_wait"),
-  advertise_tree(OldTree, EventWindow).
-
-flush_messages() ->
-  receive
-    _ ->
-      flush_messages()
-  after 1 ->
-    ok
-  end.
-
-%% Either wait for a bust cache event, or a forced tree regen
-wait_for_tree(OldTree, EventWindow) ->
-  receive
-    bust_cache ->
-      wait_for_tree2(OldTree, EventWindow);
-    flush ->
-      %% Something needs the tree right now, we set the tree to undefined to force it to send
-      wait_for_tree2(undefined, EventWindow)
-  end.
-
-wait_for_tree2(OldTree, EventWindow) ->
-  NewTree =
-    case get_tree(node(), infinity) of
-      false ->
-        OldTree;
-      {tree, OldTree} ->
-        OldTree;
-      {tree, Else} ->
-        lashup_gm_route_events:ingest(Else),
-        Else
-  end,
-  advertise_tree(NewTree, EventWindow).
-
 
 -ifdef(TEST).
 -compile(export_all).
@@ -660,17 +513,9 @@ postcondition(State, {call, ?MODULE, reachable, [Node]}, Result) ->
 %% This is a divergence from the digraph module
 %% If the node is in our routing table
 %% We will say the route back to the node is itself.
-postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) when FromNode == ToNode ->
-  Digraph = state_to_digraph(State),
-  PostCondition =
-  case digraph:vertex(Digraph, FromNode) of
-    false ->
-      Result == false;
-    _ ->
-      Result == [FromNode]
-  end,
-  digraph:delete(Digraph),
-  PostCondition;
+postcondition(_State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) when FromNode == ToNode ->
+  %% A node always has a route to itself.
+  Result == [FromNode];
 postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result) ->
   DigraphPath = get_short_path(State, FromNode, ToNode),
   case {Result, DigraphPath}  of
@@ -697,7 +542,7 @@ postcondition(_State, _Call, _Result) -> true.
 
 
 next_state(State, _V,
-    {call, gen_server, call, [lashup_gm_route, {update_node, Node, NewNodes}]}) ->
+    {call, gen_statem, call, [lashup_gm_route, {update_node, Node, NewNodes}]}) ->
   Digraph = state_to_digraph(State),
   digraph:add_vertex(Digraph, Node),
   [digraph:add_vertex(Digraph, NewNode) || NewNode <- NewNodes],
@@ -707,7 +552,7 @@ next_state(State, _V,
   update_state(Digraph, State);
 
 next_state(State, _V,
-  {call, gen_server, call, [lashup_gm_route, {delete_node, Node}]}) ->
+  {call, gen_statem, call, [lashup_gm_route, {delete_node, Node}]}) ->
   Digraph = state_to_digraph(State),
   digraph:del_vertex(Digraph, Node),
   update_state(Digraph, State);
@@ -737,8 +582,8 @@ verify_routes(FromNode, ToNode) ->
 
 command(_S) ->
   oneof([
-      {call, gen_server, call, [?MODULE, update_node_gen()]},
-      {call, gen_server, call, [?MODULE, {delete_node, node_gen()}]},
+      {call, gen_statem, call, [?MODULE, update_node_gen()]},
+      {call, gen_statem, call, [?MODULE, {delete_node, node_gen()}]},
       {call, ?MODULE, reachable, [node_gen()]},
       {call, ?MODULE, verify_routes, [node_gen(), node_gen()]}
     ]).
@@ -757,7 +602,7 @@ prop_server_works_fine() ->
       end)).
 
 stop() ->
-  gen_server:stop(?SERVER).
+  gen_statem:stop(?SERVER).
 
 -endif.
 

@@ -111,7 +111,7 @@ basic_events(_Config) ->
     {ok, Ref} = lashup_gm_route_events:subscribe(),
     true = (count_events(Ref) > 0),
     lashup_gm_route:update_node(500, [150]),
-    0 = count_events(Ref).
+    1 = count_events(Ref).
 
 count_events(Ref) -> count_events(Ref, 0).
 

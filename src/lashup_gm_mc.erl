@@ -368,7 +368,7 @@ maybe_forward_packet(MulticastPacket0 = #{fakeroot := FakeRoot, ttl := TTL, orig
 forward_packet(MulticastPacket = #{only_nodes := Nodes}, Tree, _State) ->
   Trees = [lashup_gm_route:prune_tree(Node, Tree) || Node <- Nodes],
   Tree1 = lists:foldl(fun maps:merge/2, #{}, Trees),
-  Children = lashup_gm_route:children(node(), Tree1),
+  Children = lashup_gm_route:reverse_children(node(), Tree1),
   bsend(MulticastPacket, Children),
   ok;
 forward_packet(MulticastPacket, Tree, _State) ->

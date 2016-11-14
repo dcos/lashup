@@ -30,7 +30,8 @@
 
 -record(state, {
     reference = erlang:error() :: reference() ,
-    pid = erlang:error() :: pid()
+    pid = erlang:error() :: pid(),
+    tree = undefined :: lashup_gm_route:tree() | undefined
 }).
 -type state() :: #state{}.
 
@@ -203,9 +204,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
--spec(handle_ingest(lashup_gm_route:tree(), state()) -> ok).
-handle_ingest(Tree, _State = #state{reference = Reference, pid = Pid}) ->
+-spec(handle_ingest(lashup_gm_route:tree(), state()) -> state()).
+handle_ingest(Tree, State0 = #state{tree = Tree}) ->
+    State0;
+handle_ingest(Tree, State0 = #state{reference = Reference, pid = Pid}) ->
     Event = #{type => tree, tree => Tree, ref => Reference},
     Pid ! {?MODULE, Event},
-    ok.
+    State0#state{tree = Tree}.
 
