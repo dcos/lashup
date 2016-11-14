@@ -53,6 +53,8 @@
 
 -export_type([kv/0]).
 
+-define(KV_TOPIC, lashup_kv_20161114).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -111,7 +113,7 @@ start_link() ->
 init([]) ->
   init_db(),
   %% Maybe read_concurrency?
-  {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
+  {ok, Reference} = lashup_gm_mc_events:subscribe([?KV_TOPIC]),
   State = #state{mc_ref = Reference},
   {ok, State}.
 
@@ -309,7 +311,7 @@ check_map(NewKV = #kv{key = Key}) ->
 -spec (propagate(kv()) -> ok).
 propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
   Payload = #{type => full_update, reason => op, key => Key, map => Map, vclock => VClock},
-  lashup_gm_mc:multicast(?MODULE, Payload),
+  lashup_gm_mc:multicast(?KV_TOPIC, Payload),
   ok.
 
 % @private either gets the KV object for a given key, or returns an empty one
