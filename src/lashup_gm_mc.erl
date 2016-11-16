@@ -381,6 +381,7 @@ bsend(MulticastPacket, Children) ->
     fun(Child) ->
       case erlang:send({?SERVER, Child}, MulticastPacket, [noconnect]) of
         noconnect ->
+          lager:warning("Dropping packet due to stale tree"),
           exometer:update([lashup_gm_mc, drop_noconnect], 1);
         _ ->
           ok
