@@ -12,8 +12,11 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/0,
-  ping/1]).
+-export([
+  start_link/0,
+  ping/1,
+  check_max_ping_ms/0
+]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -28,9 +31,7 @@
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
   ping_times = #{} :: map(),
-  log_base = lashup_config:ping_log_base() :: float(),
-  min_ping_ms = lashup_config:min_ping_ms() :: non_neg_integer(),
-  max_ping_ms = lashup_config:max_ping_ms() :: non_neg_integer()
+  log_base = lashup_config:ping_log_base() :: float()
 }).
 -type state() :: #state{}.
 
@@ -46,6 +47,15 @@ ping(Node) ->
   gen_server:call(?SERVER, {ping, Node}),
   ok.
 
+check_max_ping_ms() ->
+  case lashup_gm:gm() of
+    Members when length(Members) > 500 ->
+      application:set_env(lashup, max_ping_ms, 10000);
+    Members when length(Members) > 1000 ->
+      application:set_env(lashup, max_ping_ms, 30000);
+    _ ->
+      ok
+  end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -81,6 +91,7 @@ init([]) ->
   ok = net_kernel:monitor_nodes(true),
   %% The reason not to randomize this is that we'd prefer all nodes pause around the same time
   %% It creates an easier to debug situation if this call actually does kill performance
+  timer:apply_interval(10000, ?MODULE, check_max_ping_ms, []),
   {ok, #state{}}.
 
 %%--------------------------------------------------------------------
@@ -115,12 +126,6 @@ handle_call(_Request, _From, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
-handle_cast(PingMessage = #{message := ping}, State) ->
-  handle_ping(PingMessage, State),
-  {noreply, State};
-handle_cast(PongMessage = #{message := pong}, State) ->
-  State1 = handle_pong(PongMessage, State),
-  {noreply, State1};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -138,6 +143,12 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state()} |
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
+handle_info(PingMessage = #{message := ping}, State) ->
+  handle_ping(PingMessage, State),
+  {noreply, State};
+handle_info(PongMessage = #{message := pong}, State) ->
+  State1 = handle_pong(PongMessage, State),
+  {noreply, State1};
 handle_info({nodedown, NodeName}, State0 = #state{ping_times = PingTimes0}) ->
   PingTimes1 = maps:remove(NodeName, PingTimes0),
   State1 = State0#state{ping_times = PingTimes1},
@@ -184,14 +195,24 @@ code_change(_OldVsn, State, _Extra) ->
 
 
 -spec(do_ping(Node :: node(), State :: state()) -> State1 :: state()).
-do_ping(Node, State0 = #state{pings_in_flight = PIF}) ->
+do_ping(Node, State0 = #state{pings_in_flight = PIF, ping_times = PingTimes}) ->
   Now = erlang:monotonic_time(milli_seconds),
   Ref = make_ref(),
   MaxEstRTT = determine_ping_time(Node, State0),
   {ok, TimerRef} = timer:send_after(MaxEstRTT, {ping_failed, Ref}),
-  gen_server:cast({?SERVER, Node}, #{message => ping, from => self(), now => Now, ref => Ref, timer_ref => TimerRef}),
-  PIF2 = orddict:store(Ref, {MaxEstRTT, Node}, PIF),
-  State0#state{pings_in_flight = PIF2}.
+  Message = #{message => ping, from => self(), now => Now, ref => Ref, timer_ref => TimerRef},
+  case erlang:send({?SERVER, Node}, Message, [noconnect, nosuspend]) of
+    ok ->
+      PIF2 = orddict:store(Ref, {MaxEstRTT, Node}, PIF),
+      State0#state{pings_in_flight = PIF2};
+    %% Treat ping as failed
+    _ ->
+      lager:info("Ping to node ~p failed, because erlang:send failed", [Node]),
+      timer:cancel(TimerRef),
+      lashup_hyparview_membership:ping_failed(Node),
+      PingTimes2 = maps:remove(Node, PingTimes),
+      State0#state{ping_times = PingTimes2}
+  end.
 
 -spec(handle_ping_failed(Ref :: reference(), State :: state()) -> State1 :: state()).
 handle_ping_failed(Ref, State = #state{ping_times = PingTimes, pings_in_flight = PIF}) ->
@@ -209,7 +230,7 @@ handle_ping_failed(Ref, State = #state{ping_times = PingTimes, pings_in_flight =
 -spec(handle_ping(PingMessage :: ping_message(), State :: state()) -> ok).
 handle_ping(PingMessage = #{from := From}, _State) ->
   PongMessage = PingMessage#{message => pong, receiving_node => node()},
-  gen_server:cast(From, PongMessage),
+  erlang:send(From, PongMessage, [noconnect, nosuspend]),
   ok.
 
 -spec(handle_pong(PongMessage :: pong_message(), State0 :: state()) -> State1 :: state()).
@@ -236,9 +257,10 @@ determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
   %% If unknown then might as well return the MAX PING
   case maps:find(Node, PingTimes) of
     error ->
-      State#state.max_ping_ms;
+      lashup_config:max_ping_ms();
     {ok, LastRTT} ->
       %% 2 MS is the noise floor
-      RTT = lists:max([State#state.min_ping_ms, LastRTT]),
+      MinPingMs = lashup_config:min_ping_ms(),
+      RTT = lists:max([MinPingMs, LastRTT]),
       trunc(math:log(RTT) / math:log(State#state.log_base))
   end.
