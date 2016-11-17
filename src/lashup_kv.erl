@@ -232,7 +232,8 @@ init_db(Nodes) ->
   Tables = [kv],
   TablesToCreate = Tables -- ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Tables, infinity).
+  ok = mnesia:wait_for_tables(Tables, infinity),
+  lists:foreach(fun maybe_upgrade_table/1, Tables).
 
 create_table(kv) ->
   {atomic, ok} =  mnesia:create_table(kv, [
@@ -241,6 +242,42 @@ create_table(kv) ->
     {type, set}
   ]).
 
+maybe_upgrade_table(Table) ->
+  [KV] = mnesia:dirty_read(Table, mnesia:dirty_first(Table)),
+  ok = maybe_upgrade_table2(Table, KV).
+
+maybe_upgrade_table2(_Table, #kv{lclock = _}) ->
+  ok;  %% already upgraded
+maybe_upgrade_table2(Table, _) ->
+  Fun = fun() ->
+          Query = qlc:q([R || R <- mnesia:table(Table)]),
+          qlc:e(Query)
+        end,
+  {atomic, Records} = mnesia:transaction(Fun),
+  mnesia:delete_table(Table),
+  create_table(kv),
+  MnesiaData = generate_mnesia_data(Records),
+  F = fun() -> lists:foreach(fun mnesia:write/1, MnesiaData) end,
+  case mnesia:sync_transaction(F) of
+    {atomic, _} ->
+      ok = mnesia:sync_log();
+    {aborted, Reason} ->
+      laged:error("Failed to upgrade mnesia table ~p because ~p", [Table, Reason]),
+      aborted
+  end.
+
+generate_mnesia_data(Records) ->
+  generate_mnesia_data(Records, []).
+
+generate_mnesia_data([], Acc) ->
+  lists:reverse(Acc);
+generate_mnesia_data([H|Records], Acc) ->
+  NewRecord = prepend(1, H),
+  generate_mnesia_data(Records, [NewRecord | Acc]). 
+ 
+prepend(X, Tuple) ->
+  TupleAsList = lists:reverse(tuple_to_list(Tuple)),
+  list_to_tuple(lists:reverse([X | TupleAsList])).
 
 -spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op())
       -> (fun())).
