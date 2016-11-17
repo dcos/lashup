@@ -39,8 +39,8 @@
 
 -define(SERVER, ?MODULE).
 
--define(WARN_OBJECT_SIZE_KB, 25).
--define(REJECT_OBJECT_SIZE_KB, 100).
+-define(WARN_OBJECT_SIZE_KB, 250).
+-define(REJECT_OBJECT_SIZE_KB, 1000).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -295,7 +295,7 @@ handle_op(Key, Op, OldVClock, State0) ->
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
 check_map(NewKV = #kv{key = Key}) ->
-  case size(erlang:term_to_binary(NewKV, [compressed])) of
+  case erlang:external_size(NewKV) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
       {error, value_too_large};
     Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
