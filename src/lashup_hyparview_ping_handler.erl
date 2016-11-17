@@ -47,6 +47,15 @@ ping(Node) ->
   ok.
 
 check_max_ping_ms() ->
+  %% Check if the user has manually set max ping ms, or if it's one of the settings we could have set for them
+  case application:get_env(lashup, max_ping_ms) of
+    Val when Val == undefined orelse Val == 10000 orelse Val == 30000->
+      check_max_ping_ms2();
+    _ ->
+      ok
+  end.
+
+check_max_ping_ms2() ->
   case lashup_gm:gm() of
     Members when length(Members) > 1000 ->
       application:set_env(lashup, ping_log_base, 1.0009),
@@ -254,7 +263,7 @@ record_pong(_PongMessage = #{receiving_node := ReceivingNode, now := SendTime},
 
 %% RTT is in milliseconds
 -spec(determine_ping_time(Node :: node(), State :: state()) -> RTT :: non_neg_integer()).
-determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
+determine_ping_time(Node, #state{ping_times = PingTimes})  ->
   %% If unknown then might as well return the MAX PING
   case maps:find(Node, PingTimes) of
     error ->
