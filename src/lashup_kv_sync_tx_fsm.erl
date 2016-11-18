@@ -87,6 +87,7 @@ terminate(Reason, State, _Data) ->
     lager:warning("KV AAE TX FSMs terminated (~p): ~p", [State, Reason]).
 
 finish_sync(#state{remote_pid = RemotePID}) ->
+    erlang:garbage_collect(self()),
     %% This is to ensure that all messages have flushed
     Message = #{from => self(), message => done},
     erlang:send(RemotePID, Message, [noconnect]).

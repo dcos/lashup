@@ -51,6 +51,7 @@ rx_sync(info, Message = #{key := Key, from := RemotePID, message := keydata},
 rx_sync(info, #{from := RemotePID, message := done}, #state{remote_pid = RemotePID}) ->
     Message = #{from => self(), message => rx_sync_complete},
     erlang:send(RemotePID, Message, [noconnect]),
+    erlang:garbage_collect(self()),
     keep_state_and_data.
 
 check_key(#{key := Key, vclock := RemoteVClock}) ->
