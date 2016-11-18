@@ -77,6 +77,11 @@ insert_graph(N, Tuple) ->
     lashup_gm_route:update_node({node, N}, AdjNodes),
     insert_graph(N + 1, Tuple).
 
+get_tree() ->
+    {Val, _} = timer:tc(lashup_gm_route, get_tree, [{node, 10}, 50000]),
+    timer:sleep(500),
+    ct:pal("Time: ~p", [Val]).
+
 benchmark(_Config) ->
     Graph = generate_graph(1000),
     %eprof:start(),
@@ -84,20 +89,20 @@ benchmark(_Config) ->
     %fprof:start(),
     insert_graph(1, Graph),
     %fprof:trace([start, {file, "fprof.trace"}, verbose, {procs, [whereis(lashup_gm_route)]}]),
-    {Val, _} = timer:tc(lashup_gm_route, get_tree, [{node, 10}, 50000]),
+    get_tree(),
     lashup_gm_route:update_node(foo, [1]),
-    lashup_gm_route:get_tree({node, 10}, 50000),
+    get_tree(),
     lashup_gm_route:update_node(foo, [2]),
-    lashup_gm_route:get_tree({node, 10}, 50000),
+    get_tree(),
     lashup_gm_route:update_node(foo, [1]),
-    lashup_gm_route:get_tree({node, 10}, 50000),
+    get_tree(),
     lashup_gm_route:update_node(foo, [2]),
-    lashup_gm_route:get_tree({node, 10}, 50000),
+    get_tree(),
     lashup_gm_route:update_node(foo, [1]),
-    lashup_gm_route:get_tree({node, 10}, 50000),
+    get_tree().
     %fprof:trace([stop]),
     %fprof:profile({file, "fprof.trace"}),
-    ct:pal("Time: ~p", [Val]).
+    %ct:pal("Time: ~p", [Val]).
     %fprof:analyse([totals, {dest, "fprof.analysis"}]).
 
 % eprof:stop_profiling(),
