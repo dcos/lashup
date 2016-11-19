@@ -73,7 +73,7 @@ upgrade_test(_Config) ->
  {atomic, _} = mnesia:transaction(Fun),
  ok. 
 
-check_record(#kv{lclock = LClock}, _) ->
+check_record(#kv2{lclock = LClock}, _) ->
  LClock = 1.
 
 kv_subscribe(_Config) ->
