@@ -6,13 +6,13 @@
 %% API
 -export([start_link/1]).
 
--export([tx_sync/3, idle/3]).
+-export([tx_sync/3, idle/3, send_key/3]).
 
 %% Internal APIs
 -export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
 -include("lashup_kv.hrl").
--record(state, {node, monitor_ref, remote_pid}).
+-record(state, {node, monitor_ref, remote_pid, lclock}).
 
 
 start_link(Node) ->
@@ -33,9 +33,9 @@ init2(Node) ->
             {stop, remote_node_no_aae};
         {error, Reason} ->
             {stop, {other_error, Reason}};
-        {ok, RemoteChildPid} ->
+        {ok, RemoteChildPid, LClock} ->
             MonitorRef = monitor(process, RemoteChildPid),
-            StateData = #state{node = Node, monitor_ref = MonitorRef, remote_pid = RemoteChildPid},
+            StateData = #state{node = Node, monitor_ref = MonitorRef, remote_pid = RemoteChildPid, lclock = LClock},
             {ok, tx_sync, StateData, [{next_event, internal, start_sync}]}
     end.
 
@@ -66,6 +66,25 @@ tx_sync(cast, {sync, Key}, StateData) ->
     defer_sync_key(NextKey),
     keep_state_and_data.
 
+tx_sync(info, #{from := RemotePID, message := rx_sync_complete},
+  StateData = #state{node = Node, remote_pid = RemotePID, lclock = LClock}) ->
+    case gen_server:call(lashup_kv, {lclock, set, Node, LClock}) of
+        {ok, updated} ->
+            {next_state, idle, StateData, [{next_event, internal, reschedule_sync}]};
+        {error, Reason} ->
+            {stop, Reason}
+    end;
+
+tx_sync(internal, start_sync, StateData0 = #state{remote_pid = RemotePID, lclock = OldClock}) ->
+    case gen_server:call(lashup_kv, {lclock, get, node()}) of
+        {ok, LatestClock} when LatestClock > OldClock ->
+            start_sync(OldClock, RemotePID),
+            finish_sync(StateData0),
+            StateData1 = StateData0#state{lclock = LatestClock},
+            {keep_state, StateData1};
+        _ -> %% no new update
+            {next_state, idle, StateData0, [{next_event, internal, reschedule_sync}]}
+    end.
 
 idle(info, do_sync, StateData = #state{remote_pid = RemotePID}) ->
     lager:info("Starting tx sync with ~p", [node(RemotePID)]),
@@ -99,7 +118,23 @@ send_key_vclock(Key, _StateData = #state{remote_pid = RemotePID}) ->
 
 defer_sync_key(Key) ->
     Sleep = trunc((rand:uniform() + 0.5) * 10),
-    timer:apply_after(Sleep, gen_statem, cast, [self(), {sync, Key}]).
+    timer:apply_after(Sleep, ?MODULE, send_key, [Key, VClock, RemotePID]).
+
+fetch_latest_records(OldLClock) ->
+    MatchSpec = ets:fun2ms(
+      fun(KV = #kv2{lclock = LClock}) when LClock > OldLClock ->
+        KV
+      end
+    ),
+    lists:keysort(#kv2.lclock, mnesia:dirty_select(kv, MatchSpec)).
+
+start_sync(OldClock, RemotePID) ->
+    Records = fetch_latest_records(OldClock),
+    lists:foreach(
+        fun(#kv2{key = Key, vclock = VClock}) ->
+            defer_sync_key(Key, VClock, RemotePID)
+        end,
+        Records).
 
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
     {stop, normal};

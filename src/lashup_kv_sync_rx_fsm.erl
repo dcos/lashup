@@ -58,7 +58,7 @@ check_key(#{key := Key, vclock := RemoteVClock}) ->
     case mnesia:dirty_read(kv, Key) of
         [] ->
             true;
-        [#kv{vclock = LocalVClock}] ->
+        [#kv2{vclock = LocalVClock}] ->
             %% Check if the local VClock is a direct descendant of the remote vclock
             case riak_dt_vclock:descends(LocalVClock, RemoteVClock) of
                 true ->

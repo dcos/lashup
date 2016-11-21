@@ -53,7 +53,7 @@ loop(State) ->
 %   Event = #{key => Key, map => Map, vclock => VClock, value => Value, ref => Reference},
 
 -spec(maybe_process_event(lashup_kv:kv(), [lashup_kv:kv()], State :: state()) -> state()).
-maybe_process_event(NewRecord = #kv{key = Key}, OldRecords, State = #state{match_spec_comp = MatchSpec}) ->
+maybe_process_event(NewRecord = #kv2{key = Key}, OldRecords, State = #state{match_spec_comp = MatchSpec}) ->
   case ets:match_spec_run([{Key}], MatchSpec) of
     [true] ->
       send_event(NewRecord, OldRecords, State),
@@ -64,13 +64,13 @@ maybe_process_event(NewRecord = #kv{key = Key}, OldRecords, State = #state{match
 
 %% Rewrite the ref and send the event
 -spec(send_event(lashup_kv:kv(), [lashup_kv:kv()], state()) -> ok).
-send_event(_NewRecord = #kv{key = Key, map = Map}, [], #state{ref = Ref, pid = Pid}) ->
+send_event(_NewRecord = #kv2{key = Key, map = Map}, [], #state{ref = Ref, pid = Pid}) ->
   Value = riak_dt_map:value(Map),
   Event = #{type => ingest_new, key => Key, ref => Ref, value => Value},
   Pid ! {lashup_kv_events, Event},
   ok;
-send_event(_NewRecord = #kv{key = Key, map = Map} = _NewRecords,
-  [#kv{map = OldMap}] = _OldRecords, #state{ref = Ref, pid = Pid}) ->
+send_event(_NewRecord = #kv2{key = Key, map = Map} = _NewRecords,
+  [#kv2{map = OldMap}] = _OldRecords, #state{ref = Ref, pid = Pid}) ->
   OldValue = riak_dt_map:value(OldMap),
   Value = riak_dt_map:value(Map),
   Event = #{type => ingest_update, key => Key, ref => Ref, value => Value, old_value => OldValue},
@@ -100,6 +100,6 @@ rewrite_head(MatchHead) ->
       (_FieldName) ->
         '_'
     end,
-  MatchHead1 = [RewriteFun(FieldName) || FieldName <- record_info(fields, kv)],
-  list_to_tuple([kv | MatchHead1]).
+  MatchHead1 = [RewriteFun(FieldName) || FieldName <- record_info(fields, kv2)],
+  list_to_tuple([kv2 | MatchHead1]).
 
