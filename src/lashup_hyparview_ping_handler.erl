@@ -30,8 +30,7 @@
 
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
-  ping_times = #{} :: map(),
-  log_base = lashup_config:ping_log_base() :: float()
+  ping_times = #{} :: map()
 }).
 -type state() :: #state{}.
 
@@ -49,10 +48,12 @@ ping(Node) ->
 
 check_max_ping_ms() ->
   case lashup_gm:gm() of
-    Members when length(Members) > 500 ->
-      application:set_env(lashup, max_ping_ms, 10000);
     Members when length(Members) > 1000 ->
+      application:set_env(lashup, ping_log_base, 1.0009),
       application:set_env(lashup, max_ping_ms, 30000);
+    Members when length(Members) > 500 ->
+      application:set_env(lashup, ping_log_base, 1.00034),
+      application:set_env(lashup, max_ping_ms, 10000);
     _ ->
       ok
   end.
@@ -262,5 +263,5 @@ determine_ping_time(Node, State = #state{ping_times = PingTimes})  ->
       %% 2 MS is the noise floor
       MinPingMs = lashup_config:min_ping_ms(),
       RTT = lists:max([MinPingMs, LastRTT]),
-      trunc(math:log(RTT) / math:log(State#state.log_base))
+      trunc(math:log(RTT) / math:log(lashup_config:ping_log_base()))
   end.
