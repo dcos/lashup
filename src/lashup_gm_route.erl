@@ -14,7 +14,7 @@
 -module(lashup_gm_route).
 -author("sdhillon").
 
-%-compile(inline).
+-compile(inline).
 
 -behaviour(gen_statem).
 
