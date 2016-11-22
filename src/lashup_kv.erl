@@ -238,7 +238,7 @@ create_table(kv) ->
   {atomic, ok} =  mnesia:create_table(kv, [
     {attributes, record_info(fields, kv)},
     {disc_copies, [node()]},
-    {type, ordered_set}
+    {type, set}
   ]).
 
 
