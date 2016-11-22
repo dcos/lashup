@@ -24,8 +24,7 @@
   request_op/2,
   request_op/3,
   value/1,
-  value2/1,
-  convert_record/1
+  value2/1
 ]).
 
 %% gen_server callbacks
@@ -141,13 +140,13 @@ handle_call({op, Key, VClock, Op}, _From, State) ->
 handle_call({op, Key, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
-handle_call({lclock, get, Node}, _From, State = #state{nclock = NClock}) ->
-  LClock = maps:get(Node, NClock, 0),
-  {reply, LClock, State};
-handle_call({lclock, set, Node, LClock}, _From, State0 = #state{nclock = NClock0}) ->
-  NClock1 = maps:put(Node, LClock, NClock0),
+handle_call({clock, get, Node}, _From, State = #state{nclock = NClock}) ->
+  Clock = maps:get(Node, NClock, 0),
+  {reply, {ok, Clock}, State};
+handle_call({clock, set, Node, Clock}, _From, State0 = #state{nclock = NClock0}) ->
+  NClock1 = maps:put(Node, Clock, NClock0),
   State1 = State0#state{nclock = NClock1},
-  {reply, updated, State1};
+  {reply, {ok, updated}, State1};
 handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
   Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
   {reply, Result, State};
@@ -249,7 +248,6 @@ create_table(kv) ->
   {atomic, ok} =  mnesia:create_table(kv, [
     {attributes, record_info(fields, kv2)},
     {record_name, kv2},
-    {index, [lclock]},
     {disc_copies, [node()]},
     {type, set}
   ]).
@@ -268,7 +266,7 @@ really_upgrade_table(Table) ->
   mnesia:delete_table(Table),
   create_table(kv),
   ok = mnesia:wait_for_tables([kv], 60000),
-  Records1 = lists:map(fun convert_record/1, Records0),
+  Records1 = convert_records(Records0),
   F = fun() -> lists:foreach(fun(R) -> mnesia:write(kv, R, write) end, Records1) end,
   case mnesia:sync_transaction(F) of
     {atomic, _} ->
@@ -278,8 +276,17 @@ really_upgrade_table(Table) ->
       aborted
   end.
 
-convert_record(_R = #kv{key = Key, vclock = VClock, map = Map}) ->
-  #kv2{key = Key, vclock = VClock, map = Map, lclock = ?INIT_CLOCK}.
+convert_records(Records) ->
+  convert_records(Records, []).
+
+convert_records([], Acc) ->
+  lists:reverse(Acc);
+convert_records([Record0|Rest], Acc) ->
+  Record1 = convert_record(Record0, length(Acc) + 1),
+  convert_records(Rest, [Record1|Acc]).
+
+convert_record(_R = #kv{key = Key, vclock = VClock, map = Map}, Counter) ->
+  #kv2{key = Key, vclock = VClock, map = Map, lclock = Counter}.
 
 init_nclock() ->
   MatchSpec = ets:fun2ms(fun(#kv2{lclock = LClock}) -> LClock end),
@@ -288,7 +295,7 @@ init_nclock() ->
     [] -> maps:put(node(), 0, maps:new());
     _ -> maps:put(node(), lists:max(LClocks), maps:new())
   end.
- 
+
 -spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined,
       Op :: riak_dt_map:map_op(), NClock :: map()) -> (fun())).
 mk_write_fun(Key, OldVClock, Op, NClock) ->
@@ -345,7 +352,7 @@ handle_op(Key, Op, OldVClock, State0) ->
 
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
-check_map(NewKV = #kv{key = Key}) ->
+check_map(NewKV = #kv2{key = Key}) ->
   case erlang:external_size(NewKV) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
       {error, value_too_large};
