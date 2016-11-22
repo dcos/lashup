@@ -88,8 +88,8 @@ aae_keys(#{pid := Pid}, State) ->
 -spec(node_clocks() -> [{node(), riak_dt_vclock:vclock()}]).
 node_clocks() ->
   MatchSpec = ets:fun2ms(
-    fun(Member = #member{value = Value}) ->
-      {Member#member.node, Value}
+    fun(Member = #member2{value = Value}) ->
+      {Member#member2.node, Value}
     end
   ),
   Result = ets:select(members, MatchSpec),

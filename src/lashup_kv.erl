@@ -39,8 +39,8 @@
 
 -define(SERVER, ?MODULE).
 
--define(WARN_OBJECT_SIZE_KB, 25).
--define(REJECT_OBJECT_SIZE_KB, 100).
+-define(WARN_OBJECT_SIZE_KB, 250).
+-define(REJECT_OBJECT_SIZE_KB, 1000).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -53,6 +53,8 @@
 
 -export_type([kv/0]).
 
+-define(KV_TOPIC, lashup_kv_20161114).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -60,13 +62,13 @@
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, Op) ->
-  gen_server:call(?SERVER, {op, Key, Op}).
+  gen_server:call(?SERVER, {op, Key, Op}, infinity).
 
 
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  gen_server:call(?SERVER, {op, Key, VClock, Op}).
+  gen_server:call(?SERVER, {op, Key, VClock, Op}, infinity).
 
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
@@ -111,7 +113,7 @@ start_link() ->
 init([]) ->
   init_db(),
   %% Maybe read_concurrency?
-  {ok, Reference} = lashup_gm_mc_events:subscribe([?MODULE]),
+  {ok, Reference} = lashup_gm_mc_events:subscribe([?KV_TOPIC]),
   State = #state{mc_ref = Reference},
   {ok, State}.
 
@@ -230,13 +232,13 @@ init_db(Nodes) ->
   Tables = [kv],
   TablesToCreate = Tables -- ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Tables, 60000).
+  ok = mnesia:wait_for_tables(Tables, infinity).
 
 create_table(kv) ->
   {atomic, ok} =  mnesia:create_table(kv, [
     {attributes, record_info(fields, kv)},
     {disc_copies, [node()]},
-    {type, ordered_set}
+    {type, set}
   ]).
 
 
@@ -293,7 +295,7 @@ handle_op(Key, Op, OldVClock, State0) ->
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
 check_map(NewKV = #kv{key = Key}) ->
-  case size(erlang:term_to_binary(NewKV, [compressed])) of
+  case erlang:external_size(NewKV) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
       {error, value_too_large};
     Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
@@ -309,7 +311,7 @@ check_map(NewKV = #kv{key = Key}) ->
 -spec (propagate(kv()) -> ok).
 propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
   Payload = #{type => full_update, reason => op, key => Key, map => Map, vclock => VClock},
-  lashup_gm_mc:multicast(?MODULE, Payload),
+  lashup_gm_mc:multicast(?KV_TOPIC, Payload),
   ok.
 
 % @private either gets the KV object for a given key, or returns an empty one

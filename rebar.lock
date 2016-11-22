@@ -40,7 +40,7 @@
   1},
  {<<"riak_dt">>,
   {git,"https://github.com/sargun/riak_dt.git",
-       {ref,"df69cd4a4cb11d7bb97c2ea739c31e614d886bcf"}},
+       {ref,"3394c86fbd54e194b4fd72ca72ad42127609a4d6"}},
   0},
  {<<"setup">>,
   {git,"git://github.com/uwiger/setup.git",

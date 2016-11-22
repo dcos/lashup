@@ -44,10 +44,10 @@ callback_mode() ->
 
 tx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
-tx_sync(info, #{from := RemotePID, message := request_key, key := Key}, #state{remote_pid = RemotePID}) ->
-    send_key(Key, RemotePID),
+tx_sync({call, From}, {request_key, Key}, _) ->
+    [#kv{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(kv, Key),
+    gen_statem:reply(From, #{vclock => VClock, value => Map}),
     keep_state_and_data;
-
 tx_sync(info, #{from := RemotePID, message := rx_sync_complete}, StateData = #state{remote_pid = RemotePID}) ->
     {next_state, idle, StateData, [{next_event, internal, reschedule_sync}]};
 
@@ -61,15 +61,14 @@ tx_sync(cast, {sync, '$end_of_table'}, StateData) ->
     keep_state_and_data;
 
 tx_sync(cast, {sync, Key}, StateData) ->
-    share_key(Key, StateData),
+    send_key_vclock(Key, StateData),
     NextKey = mnesia:dirty_next(kv, Key),
     defer_sync_key(NextKey),
     keep_state_and_data.
 
 
 idle(info, do_sync, StateData = #state{remote_pid = RemotePID}) ->
-    Message = #{from => self(), message => start_sync},
-    erlang:send(RemotePID, Message, [noconnect]),
+    lager:info("Starting tx sync with ~p", [node(RemotePID)]),
     {next_state, tx_sync, StateData, [{next_event, internal, start_sync}]};
 idle(internal, reschedule_sync, #state{node = RemoteNode}) ->
     BaseAAEInterval = lashup_config:aae_interval(),
@@ -85,22 +84,17 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
     {ok, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
-    lager:warning("KV AAE terminated (~p): ~p", [State, Reason]).
+    lager:warning("KV AAE TX FSMs terminated (~p): ~p", [State, Reason]).
 
 finish_sync(#state{remote_pid = RemotePID}) ->
+    erlang:garbage_collect(self()),
     %% This is to ensure that all messages have flushed
-    timer:sleep(100),
     Message = #{from => self(), message => done},
     erlang:send(RemotePID, Message, [noconnect]).
 
-share_key(Key, _StateData = #state{remote_pid = RemotePID}) ->
+send_key_vclock(Key, _StateData = #state{remote_pid = RemotePID}) ->
     [#kv{vclock = VClock}] = mnesia:dirty_read(kv, Key),
     Message = #{from => self(), key => Key, vclock => VClock, message => keydata},
-    erlang:send(RemotePID, Message, [noconnect]).
-
-send_key(Key, RemotePID) ->
-    [#kv{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(kv, Key),
-    Message = #{from => self(), key => Key, vclock => VClock, map => Map, message => kv},
     erlang:send(RemotePID, Message, [noconnect]).
 
 defer_sync_key(Key) ->

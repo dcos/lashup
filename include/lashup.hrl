@@ -6,5 +6,12 @@
   value = erlang:error() :: map()
 }).
 
--type member() :: #member{}.
+-record(member2, {
+  node :: Node :: node(),
+  last_heard :: integer(),
+  active_view = erlang:error() :: [node()],
+  value = erlang:error() :: map()
+}).
 
+-type member() :: #member{}.
+-type member2() :: #member2{}.

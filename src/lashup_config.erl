@@ -13,7 +13,7 @@
 
 %% The original C was 1
 %% I think for our use-case, we can bump it to 3?
--define(C, 1).
+-define(C, 3).
 % This number is actually log10(10000)
 -define(LOG_TOTAL_MEMBERS, 4).
 

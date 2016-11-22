@@ -65,7 +65,7 @@ finish_exchange(State = #state{nodes_checked = NodesChecked}) ->
 
 send_unchecked_nodes(NodesCheckedSet, State) ->
   MatchSpec = ets:fun2ms(
-    fun(_Member = #member{node = Node}) ->
+    fun(_Member = #member2{node = Node}) ->
       Node
     end
   ),
@@ -81,7 +81,7 @@ handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteClock = {_RemoteEpoc
   case ets:lookup(members, Node) of
   [] ->
     State;
-  [Member = #member{value = #{epoch := LocalEpoch, clock := LocalClock}}] ->
+  [Member = #member2{value = #{epoch := LocalEpoch, clock := LocalClock}}] ->
     State1 = State#state{nodes_checked = [Node|NodeChecked]},
     case RemoteClock < {LocalEpoch, LocalClock} of
       %% Only send my local version if I have a strictly "newer" clock
@@ -95,8 +95,8 @@ handle_node_clock(_NodeClock = #{node_clock := {Node, RemoteClock = {_RemoteEpoc
 
 send_event(Pid, Member) ->
   UpdatedNode = to_event(Member),
-  CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
-  erlang:send(Pid, {event, CompressedTerm}, [noconnect]).
+  BinaryTerm = term_to_binary(UpdatedNode),
+  erlang:send(Pid, {event, BinaryTerm}, [noconnect]).
 
 
 send_member(Node, _State = #state{fanout_pid = Pid}) ->
@@ -105,15 +105,15 @@ send_member(Node, _State = #state{fanout_pid = Pid}) ->
       ok;
     [Member] ->
       UpdatedNode = to_event(Member),
-      CompressedTerm = term_to_binary(UpdatedNode, [compressed]),
-      erlang:send(Pid, {event, CompressedTerm}, [noconnect])
+      BinaryTerm = term_to_binary(UpdatedNode),
+      erlang:send(Pid, {event, BinaryTerm}, [noconnect])
   end.
 
 
-to_event(Member = #member{}) ->
+to_event(Member = #member2{}) ->
   #{
     message => updated_node,
-    node => Member#member.node,
-    value => Member#member.value,
+    node => Member#member2.node,
+    value => Member#member2.value,
     ttl => 1
   }.
