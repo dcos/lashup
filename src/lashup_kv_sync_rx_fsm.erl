@@ -55,7 +55,7 @@ rx_sync(info, #{from := RemotePID, message := done}, #state{remote_pid = RemoteP
     keep_state_and_data.
 
 check_key(#{key := Key, vclock := RemoteVClock}) ->
-    case mnesia:dirty_read(kv, Key) of
+    case mnesia:dirty_read(?KV_TABLE, Key) of
         [] ->
             true;
         [#kv2{vclock = LocalVClock}] ->

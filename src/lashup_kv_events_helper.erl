@@ -34,14 +34,14 @@ start_link(MatchSpec) ->
   {ok, Ref}.
 
 init(State) ->
-  ok = mnesia:wait_for_tables([kv], 5000),
-  mnesia:subscribe({table, kv, detailed}),
+  ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
+  mnesia:subscribe({table, ?KV_TABLE, detailed}),
   State1 = dump_events(State),
   loop(State1).
 
 loop(State) ->
   receive
-    {mnesia_table_event, {write, _Table = kv, NewRecord, OldRecords, _ActivityId}} ->
+    {mnesia_table_event, {write, _Table = ?KV_TABLE, NewRecord, OldRecords, _ActivityId}} ->
       State1 = maybe_process_event(NewRecord, OldRecords, State),
       loop(State1);
     Any ->
@@ -79,7 +79,7 @@ send_event(_NewRecord = #kv2{key = Key, map = Map} = _NewRecords,
 
 dump_events(State = #state{match_spec = MatchSpec}) ->
   RewrittenMatchspec = rewrite_matchspec(MatchSpec),
-  Records = mnesia:dirty_select(kv, RewrittenMatchspec),
+  Records = mnesia:dirty_select(?KV_TABLE, RewrittenMatchspec),
 
   dump_events(Records, State),
   State.

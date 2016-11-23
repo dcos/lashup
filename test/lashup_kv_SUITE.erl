@@ -69,12 +69,12 @@ fix_mnesia(MnesiaDir) ->
   ok = dets:sync(Ref).  
 
 upgrade_test(_Config) ->
- Fun = fun() -> mnesia:foldl(fun check_record/2, [], kv) end,
+ Fun = fun() -> mnesia:foldl(fun check_record/2, [], kv2) end,
  {atomic, _} = mnesia:transaction(Fun),
  ok. 
 
-check_record(#kv2{lclock = LClock}, _) ->
- LClock = 1.
+check_record(#kv2{lclock = 0}, _) ->
+ ok.
 
 kv_subscribe(_Config) ->
   {ok, _} = lashup_kv:request_op(flag,

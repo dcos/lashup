@@ -14,7 +14,7 @@
 -include("lashup_kv.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
--record(state, {node, monitor_ref, remote_pid, lastclock, maxclock}).
+-record(state, {node, monitor_ref, remote_pid, lclock, maxclock}).
 
 
 start_link(Node) ->
@@ -36,19 +36,10 @@ init2(Node) ->
         {error, Reason} ->
             {stop, {other_error, Reason}};
         {ok, RemoteChildPid} ->
-            init3(RemoteChildPid, Node)
-    end.
-
-init3(RemoteChildPid, RemoteNode) ->
-    case gen_server:call(lashup_kv, {clock, get, RemoteNode}) of
-        {error, unknown_request} ->
-            {stop, remote_node_no_aae};
-        {error, Reason} ->
-            {stop, {other_error, Reason}};
-        {ok, Clock} ->
+            LClock = lashup_kv:dirty_get_lclock(Node),
             MonitorRef = monitor(process, RemoteChildPid),
-            StateData = #state{node = RemoteNode, monitor_ref = MonitorRef,
-                remote_pid = RemoteChildPid, lastclock = Clock, maxclock = Clock},
+            StateData = #state{node = Node, monitor_ref = MonitorRef,
+                remote_pid = RemoteChildPid, lclock = LClock, maxclock = LClock},
             {ok, tx_sync, StateData, [{next_event, internal, start_sync}]}
     end.
 
@@ -59,39 +50,40 @@ tx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{m
     handle_disconnect(Disconnect);
 
 tx_sync({call, From}, {request_key, Key}, _) ->
-    [#kv2{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(kv, Key),
+    [#kv2{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(?KV_TABLE, Key),
     gen_statem:reply(From, #{vclock => VClock, value => Map}),
     keep_state_and_data;
 
 tx_sync(info, #{from := RemotePID, message := rx_sync_complete},
-  StateData0 = #state{node = Node, remote_pid = RemotePID, maxclock = MaxClock}) ->
-    case gen_server:call(lashup_kv, {clock, set, Node, MaxClock}) of
-        {ok, updated} ->
-            StateData1 = StateData0#state{lastclock = MaxClock},
-            {next_state, idle, StateData1, [{next_event, internal, reschedule_sync}]};
-        {error, Reason} ->
+  StateData = #state{node = Node, remote_pid = RemotePID, maxclock = MaxClock}) ->
+    NClock = #nclock{key = Node, lclock = MaxClock},
+    case mnesia:sync_transaction(fun() -> mnesia:write(NClock) end)  of
+        {atomic, _} ->
+            {next_state, idle, StateData, [{next_event, internal, reschedule_sync}]};
+        {aborted, Reason} ->
+            lager:error("Couldn't write to nclock table because ~p", [Reason]),
             {stop, Reason}
     end;
 
-tx_sync(internal, start_sync, _StateData = #state{lastclock = LastClock}) ->
-    NextKey = maybe_fetch_next_key(mnesia:dirty_first(kv), LastClock),
+tx_sync(internal, start_sync, StateData = #state{maxclock = MaxClock}) ->
+    LClock = MaxClock,
+    NextKey = maybe_fetch_next_key(mnesia:dirty_first(?KV_TABLE), LClock),
     defer_sync_key(NextKey),
-    keep_state_and_data;
+    {keep_state, StateData#state{lclock = LClock}};
 
 tx_sync(cast, {sync, '$end_of_table'}, #state{remote_pid = RemotePID}) ->
     finish_sync(RemotePID),
     keep_state_and_data;
 
-tx_sync(cast, {sync, Key},
-  StateData = #state{remote_pid = RemotePID, lastclock = LastClock, maxclock = MaxClock0}) ->
+tx_sync(cast, {sync, Key}, StateData = #state{remote_pid = RemotePID, lclock = LClock, maxclock = MaxClock0}) ->
     KeyClock = send_key_vclock(Key, RemotePID),
-    NextKey = maybe_fetch_next_key(mnesia:dirty_next(kv, Key), LastClock),
+    NextKey = maybe_fetch_next_key(mnesia:dirty_next(?KV_TABLE, Key), LClock),
     defer_sync_key(NextKey),
-    MaxClock1 = maybe_update_clock(KeyClock, MaxClock0),
+    MaxClock1 = erlang:max(KeyClock, MaxClock0),
     {keep_state, StateData#state{maxclock = MaxClock1}}.
 
-idle(info, do_sync, StateData = #state{remote_pid = RemotePID}) ->
-    lager:info("Starting tx sync with ~p", [node(RemotePID)]),
+idle(info, do_sync, StateData = #state{node = RemoteNode}) ->
+    lager:info("Starting tx sync with ~p", [RemoteNode]),
     {next_state, tx_sync, StateData, [{next_event, internal, start_sync}]};
 
 idle(internal, reschedule_sync, #state{node = RemoteNode}) ->
@@ -117,7 +109,7 @@ finish_sync(RemotePID) ->
     erlang:send(RemotePID, Message, [noconnect]).
 
 send_key_vclock(Key, RemotePID) ->
-    [#kv2{vclock = VClock, lclock = KeyClock}] = mnesia:dirty_read(kv, Key),
+    [#kv2{vclock = VClock, lclock = KeyClock}] = mnesia:dirty_read(?KV_TABLE, Key),
     Message = #{from => self(), key => Key, vclock => VClock, message => keydata},
     erlang:send(RemotePID, Message, [noconnect]),
     KeyClock.
@@ -128,20 +120,15 @@ defer_sync_key(Key) ->
 
 maybe_fetch_next_key(Key, _) when Key == '$end_of_table' ->
     Key;
-maybe_fetch_next_key(Key, LastClock) ->
-    [#kv2{lclock = KeyClock}] = mnesia:dirty_read(kv, Key),
-    maybe_fetch_next_key(Key, KeyClock, LastClock).
+maybe_fetch_next_key(Key, LClock) ->
+    [#kv2{lclock = KeyClock}] = mnesia:dirty_read(?KV_TABLE, Key),
+    maybe_fetch_next_key(Key, KeyClock, LClock).
 
-maybe_fetch_next_key(Key, KeyClock, LastClock) when KeyClock >= LastClock ->
+maybe_fetch_next_key(Key, KeyClock, LClock) when KeyClock >= LClock ->
     Key;
-maybe_fetch_next_key(Key, _, LastClock) ->
-    NextKey = mnesia:dirty_next(kv, Key),
-    maybe_fetch_next_key(NextKey, LastClock).
-
-maybe_update_clock(KeyClock, MaxClock) when KeyClock > MaxClock ->
-    KeyClock;
-maybe_update_clock(_, MaxClock) ->
-    MaxClock.
+maybe_fetch_next_key(Key, _, LClock) ->
+    NextKey = mnesia:dirty_next(?KV_TABLE, Key),
+    maybe_fetch_next_key(NextKey, LClock).
 
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
     {stop, normal};
