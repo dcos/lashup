@@ -16,7 +16,6 @@
 -behaviour(gen_server).
 
 -include_lib("stdlib/include/ms_transform.hrl").
--include_lib("stdlib/include/qlc.hrl").
 
 %% API
 -export([
@@ -24,7 +23,8 @@
   request_op/2,
   request_op/3,
   value/1,
-  value2/1
+  value2/1,
+  dirty_get_lclock/1
 ]).
 
 %% gen_server callbacks
@@ -38,6 +38,7 @@
 -export_type([key/0]).
 
 -define(SERVER, ?MODULE).
+-define(INIT_LCLOCK, -1).
 
 -define(WARN_OBJECT_SIZE_KB, 250).
 -define(REJECT_OBJECT_SIZE_KB, 1000).
@@ -48,8 +49,11 @@
 
 
 -include("lashup_kv.hrl").
--type kv() :: #kv{}.
+-type kv() :: #kv2{}.
 -type state() :: #state{}.
+-type nclock() :: #nclock{}.
+-type lclock() :: non_neg_integer().
+-type tables() :: list().
 
 -export_type([kv/0]).
 
@@ -73,13 +77,13 @@ request_op(Key, VClock, Op) ->
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
   {_, KV} = op_getkv(Key),
-  riak_dt_map:value(KV#kv.map).
+  riak_dt_map:value(KV#kv2.map).
 
 
 -spec(value2(Key :: key()) -> {riak_dt_map:value(), riak_dt_vclock:vclock()}).
 value2(Key) ->
   {_, KV} = op_getkv(Key),
-  {riak_dt_map:value(KV#kv.map), KV#kv.vclock}.
+  {riak_dt_map:value(KV#kv2.map), KV#kv2.vclock}.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -229,63 +233,109 @@ init_db(Nodes) ->
   mnesia:change_table_copy_type (schema, node(), disc_copies), % If the node was already running
   {ok, _} = application:ensure_all_started(mnesia),
   ExistingTables = mnesia:system_info(tables),
-  Tables = [kv],
+  Tables = [?KV_TABLE, nclock],
   TablesToCreate = Tables -- ExistingTables,
+  Alltables = TablesToCreate ++ ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Tables, infinity).
+  ok = mnesia:wait_for_tables(Alltables, infinity),
+  ok = maybe_upgrade_table(ExistingTables).
 
-create_table(kv) ->
-  {atomic, ok} =  mnesia:create_table(kv, [
-    {attributes, record_info(fields, kv)},
+create_table(Table) ->
+  {atomic, ok} =  mnesia:create_table(Table, [
+    {attributes, get_record_info(Table)},
     {disc_copies, [node()]},
     {type, set}
   ]).
 
+get_record_info(kv2) ->
+  record_info(fields, kv2);
+get_record_info(nclock) ->
+  record_info(fields, nclock).
 
--spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op())
-      -> (fun())).
+-spec(maybe_upgrade_table(tables()) -> ok|aborted).
+maybe_upgrade_table(ExistingTables) ->
+  case {lists:member(?KV_TABLE, ExistingTables), lists:member(?OLD_KV_TABLE, ExistingTables)} of
+    {true, _} ->
+        ok; %% already upgraded
+    {false, false} ->
+        ok; %% nothing to upgrade
+    {false, true} ->
+        upgrade_table(kv)
+  end.
+
+-spec(upgrade_table(kv) -> ok|aborted).
+upgrade_table(kv) ->
+  F = fun() ->
+        Records = mnesia:foldl(fun convert_and_write_record/2, ?INIT_LCLOCK, ?OLD_KV_TABLE),
+        NClock = #nclock{key = node(), lclock = length(Records)},
+        mnesia:write(NClock)
+      end,
+  case mnesia:sync_transaction(F) of
+    {atomic, _} ->
+      ok = mnesia:sync_log();
+    {aborted, Reason} ->
+      lager:error("Failed to upgrade kv table because ~p", [Reason]),
+      aborted
+  end.
+
+convert_and_write_record(Record0, Counter0) ->
+    Counter1 = Counter0 + 1,
+    Record1 = convert_record(Record0, Counter1),
+    mnesia:write(Record1),
+    Counter1.
+
+convert_record(_R = #kv{key = Key, vclock = VClock, map = Map}, Counter) ->
+  #kv2{key = Key, vclock = VClock, map = Map, lclock = Counter}.
+
+-spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined,
+      Op :: riak_dt_map:map_op()) -> (fun())).
 mk_write_fun(Key, OldVClock, Op) ->
-  Node = node(),
   fun() ->
-    NewKV =
-      case mnesia:read(kv, Key, write) of
+    {NewKV, NClock} =
+      case mnesia:read(?KV_TABLE, Key, write) of
         [] ->
-          VClock = riak_dt_vclock:increment(Node, riak_dt_vclock:fresh()),
-          Counter = riak_dt_vclock:get_counter(Node, VClock),
-          Dot = {Node, Counter},
-          {ok, Map} = riak_dt_map:update(Op, Dot, riak_dt_map:new()),
-          #kv{key = Key, vclock = VClock, map = Map};
-        [_ExistingKV = #kv{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
+          prepare_kv(Key, riak_dt_map:new(), riak_dt_vclock:fresh(), Op);
+        [#kv2{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
           mnesia:abort(concurrency_violation);
-        [ExistingKV = #kv{vclock = VClock, map = Map}] ->
-          VClock1 = riak_dt_vclock:increment(Node, VClock),
-          Counter = riak_dt_vclock:get_counter(Node, VClock1),
-          Dot = {Node, Counter},
-          {ok, Map1} = riak_dt_map:update(Op, Dot, Map),
-          ExistingKV#kv{vclock = VClock1, map = Map1}
+        [#kv2{vclock = VClock, map = Map}] ->
+          prepare_kv(Key, Map, VClock, Op)
       end,
     case check_map(NewKV) of
       {error, Error} ->
         mnesia:abort(Error);
       ok ->
-        mnesia:write(NewKV)
+        mnesia:write(NewKV),
+        mnesia:write(NClock)
     end,
     NewKV
   end.
 
+-spec(prepare_kv(Key :: key(), Map0 :: riak_dt_map:dt_map(), VClock0 :: riak_dt_vclock:vclock() | undefined,
+      Op :: riak_dt_map:map_op()) -> {kv(), nclock()}).
+prepare_kv(Key, Map0, VClock0, Op) ->
+  Node = node(),
+  VClock1 = riak_dt_vclock:increment(Node, VClock0),
+  Counter = riak_dt_vclock:get_counter(Node, VClock1),
+  Dot = {Node, Counter},
+  {ok, Map1} = riak_dt_map:update(Op, Dot, Map0),
+  LClock0 = get_lclock(Node),
+  LClock1 = increment_lclock(LClock0),
+  {#kv2{key = Key, vclock = VClock1, map = Map1, lclock = LClock1},
+   #nclock{key = Node, lclock = LClock1}}.
+
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
     State :: state()) -> {Reply :: term(), State1 :: state()}.
-handle_op(Key, Op, OldVClock, State0) ->
+handle_op(Key, Op, OldVClock, State) ->
   Fun = mk_write_fun(Key, OldVClock, Op),
   case mnesia:sync_transaction(Fun) of
-    {atomic, #kv{} = NewKV} ->
+    {atomic, NewKV} ->
       ok = mnesia:sync_log(),
       dumped = mnesia:dump_log(),
       propagate(NewKV),
-      NewValue = riak_dt_map:value(NewKV#kv.map),
-      {{ok, NewValue}, State0};
+      NewValue = riak_dt_map:value(NewKV#kv2.map),
+      {{ok, NewValue}, State};
     {aborted, Reason} ->
-      {{error, Reason}, State0}
+      {{error, Reason}, State}
   end.
   %% We really want to make sure this persists and we don't have backwards traveling clocks
 
@@ -294,7 +344,7 @@ handle_op(Key, Op, OldVClock, State0) ->
 
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
-check_map(NewKV = #kv{key = Key}) ->
+check_map(NewKV = #kv2{key = Key}) ->
   case erlang:external_size(NewKV) of
     Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
       {error, value_too_large};
@@ -309,7 +359,7 @@ check_map(NewKV = #kv{key = Key}) ->
   end.
 
 -spec (propagate(kv()) -> ok).
-propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
+propagate(_KV = #kv2{key = Key, map = Map, vclock = VClock}) ->
   Payload = #{type => full_update, reason => op, key => Key, map => Map, vclock => VClock},
   lashup_gm_mc:multicast(?KV_TOPIC, Payload),
   ok.
@@ -317,14 +367,29 @@ propagate(_KV = #kv{key = Key, map = Map, vclock = VClock}) ->
 % @private either gets the KV object for a given key, or returns an empty one
 -spec(op_getkv(key()) -> {new, kv()} | {existing, kv()}).
 op_getkv(Key) ->
-  case mnesia:dirty_read(kv, Key) of
+  case mnesia:dirty_read(?KV_TABLE, Key) of
     [] ->
-      {new, #kv{key = Key}};
+      {new, #kv2{key = Key}};
     [KV] ->
       {existing, KV}
   end.
 
+-spec(dirty_get_lclock(node()) -> lclock()).
+dirty_get_lclock(Key) ->
+  get_lclock(fun mnesia:dirty_read/2, Key).
 
+-spec(get_lclock(node()) -> lclock()).
+get_lclock(Key) ->
+  get_lclock(fun mnesia:read/2, Key).
+
+-spec(get_lclock(fun(), node()) -> lclock()).
+get_lclock(READ, Key) ->
+  case READ(nclock, Key) of
+    [] ->
+      ?INIT_LCLOCK;
+    [#nclock{lclock = LClock}] ->
+      LClock
+  end.
 
 -spec(handle_lashup_gm_mc_event(map(), state()) -> state()).
 handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State) ->
@@ -333,28 +398,37 @@ handle_lashup_gm_mc_event(Payload, State) ->
   lager:debug("Unknown GM MC event: ~p", [Payload]),
   State.
 
--spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock())
-      -> fun(() -> kv())).
+-spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(),
+       RemoteVClock :: riak_dt_vclock:vclock())
+       -> fun(() -> kv())).
 mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
   fun() ->
-    case mnesia:read(kv, Key, write) of
+    case mnesia:read(?KV_TABLE, Key, write) of
       [] ->
-        ok = mnesia:write(KV = #kv{key = Key, vclock = RemoteVClock, map = RemoteMap}),
+        LClock0 = get_lclock(node()),
+        LClock1 = increment_lclock(LClock0),
+        KV = #kv2{key = Key, vclock = RemoteVClock, map = RemoteMap, lclock = LClock1},
+        NClock = #nclock{key = node(), lclock = LClock1},
+        ok = mnesia:write(KV),
+        ok = mnesia:write(NClock),
         KV;
       [KV] ->
         maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock))
     end
   end.
--spec(maybe_full_update({true | false, kv()}) -> kv()).
-maybe_full_update({false, KV}) ->
+
+-spec(maybe_full_update({true | false, kv(), nclock()}) -> kv()).
+maybe_full_update({false, KV, _}) ->
   KV;
-maybe_full_update({true, KV}) ->
+maybe_full_update({true, KV, NClock}) ->
   ok = mnesia:write(KV),
+  ok = mnesia:write(NClock),
   KV.
 
--spec(should_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock())
-    -> {true | false, kv()}).
-should_full_update(LocalKV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+-spec(should_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(),
+        RemoteVClock :: riak_dt_vclock:vclock())
+          -> {true | false, kv(), nclock()}).
+should_full_update(LocalKV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   case {riak_dt_vclock:descends(RemoteVClock, LocalVClock), riak_dt_vclock:descends(LocalVClock, RemoteVClock)} of
     {true, false} ->
       create_full_update(LocalKV, RemoteMap, RemoteVClock);
@@ -362,18 +436,29 @@ should_full_update(LocalKV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock)
       create_full_update(LocalKV, RemoteMap, RemoteVClock);
     %% Either they are equal, or the local one is newer - perhaps trigger AAE?
     _ ->
-      {false, LocalKV}
+      LClock0 = get_lclock(node()),
+      LClock1 = increment_lclock(LClock0),
+      NClock = #nclock{key = node(), lclock = LClock1},
+      {false, LocalKV, NClock}
   end.
--spec(create_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(), RemoteVClock :: riak_dt_vclock:vclock()) ->
-  {true, kv()}).
-create_full_update(KV = #kv{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
-  Map1 = riak_dt_map:merge(RemoteMap, KV#kv.map),
+
+-spec(create_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(),
+        RemoteVClock :: riak_dt_vclock:vclock()) ->
+  {true, kv(), nclock()}).
+create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
+  Map1 = riak_dt_map:merge(RemoteMap, KV#kv2.map),
   VClock1 = riak_dt_vclock:merge([LocalVClock, RemoteVClock]),
-  KV1 = KV#kv{map = Map1, vclock = VClock1},
-  {true, KV1}.
+  LClock0 = get_lclock(node()),
+  LClock1 = increment_lclock(LClock0),
+  KV1 = KV#kv2{map = Map1, vclock = VClock1, lclock = LClock1},
+  NClock = #nclock{key = node(), lclock = LClock1},
+  {true, KV1, NClock}.
 
 -spec(handle_full_update(map(), state()) -> state()).
-handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State0) ->
+handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
   Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
   {atomic, _} = mnesia:sync_transaction(Fun),
-  State0.
+  State.
+
+increment_lclock(N) ->
+  N + 1.

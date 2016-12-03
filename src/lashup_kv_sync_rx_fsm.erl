@@ -55,10 +55,10 @@ rx_sync(info, #{from := RemotePID, message := done}, #state{remote_pid = RemoteP
     keep_state_and_data.
 
 check_key(#{key := Key, vclock := RemoteVClock}) ->
-    case mnesia:dirty_read(kv, Key) of
+    case mnesia:dirty_read(?KV_TABLE, Key) of
         [] ->
             true;
-        [#kv{vclock = LocalVClock}] ->
+        [#kv2{vclock = LocalVClock}] ->
             %% Check if the local VClock is a direct descendant of the remote vclock
             case riak_dt_vclock:descends(LocalVClock, RemoteVClock) of
                 true ->

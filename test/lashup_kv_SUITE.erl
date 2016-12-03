@@ -11,11 +11,12 @@
 -compile({parse_transform, lager_transform}).
 -compile(export_all).
 
+-include("lashup_kv.hrl").
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
-
 
 init_per_suite(Config) ->
   %% this might help, might not...
@@ -25,7 +26,6 @@ init_per_suite(Config) ->
     {ok, _} -> ok;
     {error, {already_started, _}} -> ok
   end,
-  application:ensure_all_started(lashup),
   Config.
 
 end_per_suite(Config) ->
@@ -34,7 +34,47 @@ end_per_suite(Config) ->
   Config.
 
 all() ->
-  [kv_subscribe].
+  [upgrade_test, kv_subscribe].
+
+init_per_testcase(upgrade_test, Config) ->
+  DataDir = ?config(data_dir, Config),
+  MnesiaDir = filename:join(DataDir, "mnesia"),
+  fix_mnesia(MnesiaDir),
+  ok = application:set_env(mnesia, dir, MnesiaDir),
+  application:ensure_all_started(lashup),
+  Config;
+init_per_testcase(_, Config) ->
+  application:ensure_all_started(lashup),
+  Config.
+
+end_per_testcase(_, Config) ->
+  application:stop(lashup),
+  Config.
+
+mk_repair_fun() ->
+  Node = node(),
+  fun({schema, Key, Prop0}, Acc) ->
+      Dict0 = orddict:from_list(Prop0),
+      Dict1 = orddict:update(disc_copies, fun(_) -> [Node] end, Dict0),
+      Dict2 = orddict:update(cookie, fun({Timestamp, _}) -> {Timestamp, Node} end, Dict1),
+      NewRecord = {schema, Key, orddict:to_list(Dict2)},
+      [NewRecord | Acc]
+  end.
+
+fix_mnesia(MnesiaDir) ->
+  {ok, Ref} = dets:open_file(filename:join(MnesiaDir, "schema.DAT")),
+  Fun = mk_repair_fun(),
+  Records = dets:foldl(Fun, [], Ref),
+  dets:insert(Ref, Records),
+  ok = dets:sync(Ref).  
+
+upgrade_test(_Config) ->
+ Fun = fun() -> mnesia:foldl(fun check_record/2, [], kv2) end,
+ {atomic, _} = mnesia:transaction(Fun),
+ ok. 
+
+check_record(#kv2{lclock = 0}, _) ->
+ ok.
 
 kv_subscribe(_Config) ->
   {ok, _} = lashup_kv:request_op(flag,
