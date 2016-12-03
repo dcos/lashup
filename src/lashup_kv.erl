@@ -266,8 +266,8 @@ maybe_upgrade_table(ExistingTables) ->
 -spec(upgrade_table(kv) -> ok|aborted).
 upgrade_table(kv) ->
   F = fun() ->
-        Records = mnesia:foldl(fun convert_and_write_record/2, ?INIT_LCLOCK, ?OLD_KV_TABLE),
-        NClock = #nclock{key = node(), lclock = length(Records)},
+        LClock = mnesia:foldl(fun convert_and_write_record/2, ?INIT_LCLOCK, ?OLD_KV_TABLE),
+        NClock = #nclock{key = node(), lclock = LClock},
         mnesia:write(NClock)
       end,
   case mnesia:sync_transaction(F) of
