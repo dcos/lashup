@@ -143,7 +143,8 @@ init([]) ->
   MyPid = self(),
   spawn_link(fun() -> shuffle_backoff_loop(5000, MyPid) end),
   %% Try to get in touch with contact node(s)
-  reschedule_join(15000),
+  %% Do this basically immediately (5-10s)
+  reschedule_join(5100),
   %% Schedule the maybe_neighbor
   reschedule_maybe_neighbor(30000),
   Window = lashup_utils:new_window(1000),
