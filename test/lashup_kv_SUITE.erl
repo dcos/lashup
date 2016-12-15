@@ -34,7 +34,7 @@ end_per_suite(Config) ->
   Config.
 
 all() ->
-  [upgrade_test, kv_subscribe].
+  [upgrade_test, fetch_keys, kv_subscribe].
 
 init_per_testcase(upgrade_test, Config) ->
   DataDir = ?config(data_dir, Config),
@@ -76,6 +76,19 @@ upgrade_test(_Config) ->
 check_record(#kv2{lclock = 0}, _) ->
  ok.
 
+fetch_keys(_Config) ->
+  Key1 = [a,b,c],
+  {ok, _} = lashup_kv:request_op(Key1, 
+    {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+  Key2 = [a,b,d],
+  {ok, _} = lashup_kv:request_op(Key2,
+    {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+  Key3 = [x,y,z],
+  {ok, _} = lashup_kv:request_op(Key3,
+    {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+  [Key1, Key2] = lashup_kv:keys(ets:fun2ms(fun({[a, b, '_']}) -> true end)),
+  ok.
+
 kv_subscribe(_Config) ->
   {ok, _} = lashup_kv:request_op(flag,
     {update, [{update, {color, riak_dt_lwwreg}, {assign, red, erlang:system_time(nano_seconds)}}]}),
@@ -100,5 +113,3 @@ kv_subscribe(_Config) ->
     ct:fail("Nothing received")
   end,
   ok.
-
-

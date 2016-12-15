@@ -22,6 +22,7 @@
   start_link/0,
   request_op/2,
   request_op/3,
+  keys/1,
   value/1,
   value2/1,
   dirty_get_lclock/1
@@ -73,6 +74,10 @@ request_op(Key, Op) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
   gen_server:call(?SERVER, {op, Key, VClock, Op}, infinity).
+
+-spec(keys(ets:match_spec()) -> [key()]).
+keys(MatchSpec) ->
+  op_getkeys(MatchSpec).
 
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
@@ -373,6 +378,12 @@ op_getkv(Key) ->
     [KV] ->
       {existing, KV}
   end.
+
+-spec(op_getkeys(ets:match_spec()) -> [key()]).
+op_getkeys(MatchSpec) ->
+  Keys = mnesia:dirty_all_keys(?KV_TABLE),
+  MatchSpecCompiled = ets:match_spec_compile(MatchSpec),
+  [Key || Key <- Keys, [true] == ets:match_spec_run([{Key}], MatchSpecCompiled)].
 
 -spec(dirty_get_lclock(node()) -> lclock()).
 dirty_get_lclock(Key) ->
