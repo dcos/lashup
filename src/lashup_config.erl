@@ -157,7 +157,7 @@ aae_neighbor_check_interval() ->
 
 -spec(naive_prefixes() -> [string()]).
 naive_prefixes() ->
-  get_env(naive_prefixes, ["minuteman", "navstar"]).
+  get_env(naive_prefixes, ["navstar"]).
 
 -spec(shuffle_interval() -> non_neg_integer()).
 shuffle_interval() ->

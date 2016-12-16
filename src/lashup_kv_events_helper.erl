@@ -16,7 +16,8 @@
   match_spec :: ets:match_spec(),
   match_spec_comp :: ets:comp_match_spec(),
   pid :: pid(),
-  ref :: reference()
+  ref :: reference(),
+  gc_done = true :: boolean()
 }).
 -type state() :: #state{}.
 
@@ -30,7 +31,7 @@ start_link(MatchSpec) ->
   Ref = make_ref(),
   MatchSpecCompiled = ets:match_spec_compile(MatchSpec),
   State = #state{pid = self(), match_spec_comp = MatchSpecCompiled, ref = Ref, match_spec = MatchSpec},
-  spawn_link(?MODULE, init, [State]),
+  spawn_opt(?MODULE, init, [State], [link, {fullsweep_after, 20}]),
   {ok, Ref}.
 
 init(State) ->
@@ -40,14 +41,25 @@ init(State) ->
   loop(State1).
 
 loop(State) ->
+  GCTimeout = gc_timeout(State),
   receive
     {mnesia_table_event, {write, _Table = ?KV_TABLE, NewRecord, OldRecords, _ActivityId}} ->
       State1 = maybe_process_event(NewRecord, OldRecords, State),
-      loop(State1);
+      loop(State1#state{gc_done = false});
     Any ->
       lager:warning("Got something unexpected: ~p", [Any]),
       loop(State)
+  after GCTimeout ->
+    erlang:garbage_collect(),
+    loop(State#state{gc_done = true})
   end.
+
+gc_timeout(#state{gc_done = true}) ->
+  infinity;
+gc_timeout(#state{gc_done = false}) ->
+  60000.
+
+
 
 
 %   Event = #{key => Key, map => Map, vclock => VClock, value => Value, ref => Reference},
