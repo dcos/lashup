@@ -39,7 +39,7 @@
        {ref,"a210adafdfbb904d156d8f22abd5fb58fc17de1e"}},
   1},
  {<<"riak_dt">>,
-  {git,"https://github.com/sargun/riak_dt.git",
+  {git,"https://github.com/dcos/riak_dt.git",
        {ref,"3394c86fbd54e194b4fd72ca72ad42127609a4d6"}},
   0},
  {<<"setup">>,
