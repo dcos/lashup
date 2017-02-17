@@ -2,7 +2,7 @@ machine:
   pre:
     - echo "127.0.0.1 $(uname -n|cut -f1 -d.) $(uname -n) localhost" | sudo tee /etc/hosts
   environment:
-    PATH: ${HOME}/extras/bin:${HOME}/extras/otp/19.1/bin:${PATH}
+    PATH: ${HOME}/extras/bin:${HOME}/extras/otp/19.2/bin:${PATH}
 dependencies:
   cache_directories:
     - ~/extras
@@ -20,14 +20,14 @@ dependencies:
     - sudo service postgresql stop
     - sudo service redis-server stop
     - curl -O -L https://raw.githubusercontent.com/yrashk/kerl/master/kerl && chmod 755 kerl
-    - if [ ! -d ~/extras/otp/19.1 ]; then ./kerl build 19.1 19.1; ./kerl install 19.1 ~/extras/otp/19.1; fi:
+    - if [ ! -d ~/extras/otp/19.2 ]; then ./kerl build 19.2 19.2; ./kerl install 19.2 ~/extras/otp/19.2; fi:
         timeout: 1800
     - ./rebar3 update
 
 test:
   override:
     - ./rebar3 compile
-    - ./rebar3 ct --readable=false
+    - ./rebar3 ct -v --readable=false
     - ./rebar3 eunit
     - ./rebar3 xref
     - ./rebar3 dialyzer
