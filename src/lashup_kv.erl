@@ -41,8 +41,8 @@
 -define(SERVER, ?MODULE).
 -define(INIT_LCLOCK, -1).
 
--define(WARN_OBJECT_SIZE_KB, 250).
--define(REJECT_OBJECT_SIZE_KB, 1000).
+-define(WARN_OBJECT_SIZE_MB, 60).
+-define(REJECT_OBJECT_SIZE_MB, 100).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -351,12 +351,12 @@ handle_op(Key, Op, OldVClock, State) ->
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
 check_map(NewKV = #kv2{key = Key}) ->
   case erlang:external_size(NewKV) of
-    Size when Size > ?REJECT_OBJECT_SIZE_KB * 10000 ->
+    Size when Size > ?REJECT_OBJECT_SIZE_MB * 1000000 ->
       {error, value_too_large};
-    Size when Size > (?WARN_OBJECT_SIZE_KB + ?REJECT_OBJECT_SIZE_KB) / 2 * 10000 ->
+    Size when Size > (?WARN_OBJECT_SIZE_MB + ?REJECT_OBJECT_SIZE_MB) / 2 * 1000000 ->
       lager:warning("WARNING: Object '~p' is growing too large at ~p bytes (REJECTION IMMINENT)", [Key, Size]),
       ok;
-    Size when Size > ?WARN_OBJECT_SIZE_KB * 10000 ->
+    Size when Size > ?WARN_OBJECT_SIZE_MB * 1000000 ->
       lager:warning("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
       ok;
     _ ->
