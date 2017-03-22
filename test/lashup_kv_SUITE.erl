@@ -86,7 +86,8 @@ fetch_keys(_Config) ->
   Key3 = [x,y,z],
   {ok, _} = lashup_kv:request_op(Key3,
     {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
-  [Key1, Key2] = lashup_kv:keys(ets:fun2ms(fun({[a, b, '_']}) -> true end)),
+  Keys = lashup_kv:keys(ets:fun2ms(fun({[a, b, '_']}) -> true end)),
+  true = lists:member(Key1, Keys) and lists:member(Key2, Keys) and not lists:member(Key3, Keys),
   ok.
 
 kv_subscribe(_Config) ->
