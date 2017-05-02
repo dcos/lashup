@@ -688,7 +688,7 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
     %% Let's try to reconnect to the contact nodes
     {ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
-      lager:warning("Trying to connect to connect to node from passive view, but passive view empty"),
+      lager:debug("Trying to connect to connect to node from passive view, but passive view empty"),
       ContactNodes = ordsets:from_list(contact_nodes(State)),
       UnconnectedContactNodes = ordsets:subtract(ContactNodes, ActiveView),
       State#state{passive_view = UnconnectedContactNodes};
@@ -884,7 +884,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
   PotentialNodes1 = ordsets:del_element(Sender, PotentialNodes),
   case PotentialNodes1 of
     [] ->
-      lager:warning("Handling shuffle early, because no nodes to send it to"),
+      lager:debug("Handling shuffle early, because no nodes to send it to"),
       State1 = do_shuffle(Shuffle, State),
       push_state(State1),
       State1;
