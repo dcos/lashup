@@ -47,7 +47,6 @@
   bloom_interval/0,
   aae_after/0,
   join_timeout/0,
-  naive_prefixes/0,
   aae_neighbor_check_interval/0,
   shuffle_interval/0,
   active_view_size/0,
@@ -154,10 +153,6 @@ aae_after() ->
 %% How often we see if there are any neighbors connected
 aae_neighbor_check_interval() ->
   get_env(aae_neighbor_check_interval, 5000).
-
--spec(naive_prefixes() -> [string()]).
-naive_prefixes() ->
-  get_env(naive_prefixes, ["navstar"]).
 
 -spec(shuffle_interval() -> non_neg_integer()).
 shuffle_interval() ->

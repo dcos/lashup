@@ -16,11 +16,11 @@
   start_link/0,
   get_active_view/0,
   get_passive_view/0,
-  poll_for_master_nodes/0,
   do_probe/1,
   ping_failed/1,
   recognize_pong/1,
-  recommend_neighbor/1
+  recommend_neighbor/1,
+  update_masters/1
 ]).
 
 %% gen_server callbacks
@@ -107,6 +107,10 @@ get_active_view() ->
 get_passive_view() ->
   gen_server:call(?SERVER, get_passive_view).
 
+-spec update_masters([node()]) -> ok.
+update_masters(Nodes) ->
+  gen_server:call(?SERVER, {update_masters, Nodes}).
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -142,21 +146,12 @@ init([]) ->
   FixedSeed = lashup_utils:seed(),
   MyPid = self(),
   spawn_link(fun() -> shuffle_backoff_loop(5000, MyPid) end),
-  %% Try to get in touch with contact node(s)
-  %% Do this basically immediately (5-10s)
   reschedule_join(5100),
   %% Schedule the maybe_neighbor
   reschedule_maybe_neighbor(30000),
   Window = lashup_utils:new_window(1000),
   reschedule_ping(60000),
-  spawn(?MODULE, poll_for_master_nodes, []),
-  {ok, _} = timer:apply_after(5000, ?MODULE, poll_for_master_nodes, []),
-  {ok, _} = timer:apply_after(15000, ?MODULE, poll_for_master_nodes, []),
-  {ok, _} = timer:apply_after(60000, ?MODULE, poll_for_master_nodes, []),
-  {ok, _} = timer:apply_after(120000, ?MODULE, poll_for_master_nodes, []),
 
-  %% Only poll every 5 minutes beyond that
-  {ok, _} = timer:apply_interval(300000, ?MODULE, poll_for_master_nodes, []),
   State = #state{passive_view = contact_nodes([]),
     fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window},
   {ok, State}.
@@ -178,6 +173,16 @@ init([]) ->
   {stop, Reason :: term(), NewState :: state()}).
 handle_call(stop, _From, State) ->
   {stop, normal, State};
+handle_call({update_masters, Nodes}, _From, State = #state{extra_masters = ExtraMasters}) ->
+  Nodes0 = ordsets:from_list(Nodes),
+  State0 =
+    case ordsets:del_element(node(), Nodes0) of
+      ExtraMasters ->
+        State;
+      Masters ->
+        check_state(State#state{extra_masters = Masters})
+    end,
+  {reply, ok, State0};
 handle_call({do_connect, Node}, _From, State) when is_atom(Node) ->
   send_neighbor_to(5000, Node, high),
   {reply, ok, State};
@@ -216,10 +221,6 @@ handle_cast({recognize_pong, Pong}, State) ->
 handle_cast({ping_failed, Node}, State) ->
   State1 = handle_ping_failed(Node, State),
   push_state(State1),
-  {noreply, check_state(State1)};
-handle_cast({masters, List}, State) ->
-  MasterSet = ordsets:del_element(node(), List),
-  State1 = State#state{extra_masters = MasterSet},
   {noreply, check_state(State1)};
 handle_cast({recommend_neighbor, Node}, State) ->
   handle_recommend_neighbor(Node, State),
@@ -1105,21 +1106,6 @@ handle_maybe_disconnect3(Node, State) ->
       State;
     false ->
       State
-  end.
-
-poll_for_master_nodes() ->
-  case lashup_hyparview_membership:get_active_view() of
-    [] ->
-      really_poll_for_master_nodes();
-    _ ->
-      ok
-  end.
-really_poll_for_master_nodes() ->
-  case catch lashup_utils:maybe_poll_for_master_nodes() of
-    List when is_list(List) andalso length(List) > 0 ->
-      gen_server:cast(?SERVER, {masters, List});
-    _ ->
-      ok
   end.
 
 handle_recognize_pong(_Pong = #{now := _Now, receiving_node := Node},

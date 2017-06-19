@@ -12,8 +12,18 @@
 -include_lib("kernel/include/file.hrl").
 
 %% API
--export([seed/0, shuffle_list/2, new_window/1, add_tick/1, count_ticks/1, compare_vclocks/2,
-  maybe_poll_for_master_nodes/0, subtract/2, shuffle_list/1, replace_file/2, read_file/1]).
+-export([
+  seed/0,
+  shuffle_list/2,
+  new_window/1,
+  add_tick/1,
+  count_ticks/1,
+  compare_vclocks/2,
+  subtract/2,
+  shuffle_list/1,
+  replace_file/2,
+  read_file/1
+]).
 
 -record(window, {
   samples = [] :: list(integer()),
@@ -86,18 +96,6 @@ compare_vclocks(V1, V2) ->
     true ->
       concurrent
   end.
-
-
--spec(maybe_poll_for_master_nodes() -> [node()]).
-maybe_poll_for_master_nodes() ->
-  IPs = inet_res:lookup("master.mesos", in, a, [], 1000),
-  NaivePrefixes = lashup_config:naive_prefixes(),
-  NaiveNodes = [lists:flatten(io_lib:format("~s@~s", [Prefix, inet:ntoa(IP)]))
-    || IP <- IPs, Prefix <- NaivePrefixes],
-
-  NaiveNodesAtoms0 = [list_to_atom(X) || X <- NaiveNodes],
-  NaiveNodesAtoms1 = NaiveNodesAtoms0 -- [node()],
-  ordsets:from_list(NaiveNodesAtoms1).
 
 
 -spec(subtract(List1, List2) -> Set when
