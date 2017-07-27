@@ -163,7 +163,6 @@ to_function_with_arity(1, Function) when is_function(Function, 0) ->
 
 
 -ifdef(TEST).
--compile(export_all).
 
 proper_test() ->
   true = proper:quickcheck(resolvers_work(), [{numtests, 1000}]).
