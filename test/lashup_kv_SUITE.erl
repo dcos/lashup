@@ -34,7 +34,7 @@ end_per_suite(Config) ->
   Config.
 
 all() ->
-  [upgrade_test, fetch_keys, kv_subscribe].
+  [upgrade_test, fetch_keys, kv_subscribe, remove_forgiving].
 
 init_per_testcase(upgrade_test, Config) ->
   DataDir = ?config(data_dir, Config),
@@ -114,3 +114,14 @@ kv_subscribe(_Config) ->
     ct:fail("Nothing received")
   end,
   ok.
+
+remove_forgiving(_Config) ->
+  Key = [x, y, z],
+  Field = {tratataField, riak_dt_lwwreg},
+  {ok, _} =
+    lashup_kv:request_op(Key, {update, [{update,
+      Field, {assign, true, erlang:system_time(nano_seconds)}}
+    ]}),
+  {ok, Map} = lashup_kv:request_op(Key, {update, [{remove, Field}]}),
+  {ok, Map} = lashup_kv:request_op(Key, {update, [{remove, Field}]}),
+  {ok, Map} = lashup_kv:request_op(Key, {update, [{remove, Field}]}).
