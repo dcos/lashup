@@ -322,10 +322,14 @@ prepare_kv(Key, Map0, VClock0, Op) ->
   VClock1 = riak_dt_vclock:increment(Node, VClock0),
   Counter = riak_dt_vclock:get_counter(Node, VClock1),
   Dot = {Node, Counter},
-  {ok, Map1} = riak_dt_map:update(Op, Dot, Map0),
+  Map2 =
+    case riak_dt_map:update(Op, Dot, Map0) of
+      {ok, Map1} -> Map1;
+      {error, {precondition, {not_present, _Field}}} -> Map0
+    end,
   LClock0 = get_lclock(Node),
   LClock1 = increment_lclock(LClock0),
-  {#kv2{key = Key, vclock = VClock1, map = Map1, lclock = LClock1},
+  {#kv2{key = Key, vclock = VClock1, map = Map2, lclock = LClock1},
    #nclock{key = Node, lclock = LClock1}}.
 
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
