@@ -242,7 +242,7 @@ init_db(Nodes) ->
   TablesToCreate = Tables -- ExistingTables,
   Alltables = TablesToCreate ++ ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Alltables, infinity),
+  ok = mnesia:wait_for_tables(Alltables, 60000),
   ok = maybe_upgrade_table(ExistingTables).
 
 create_table(Table) ->
