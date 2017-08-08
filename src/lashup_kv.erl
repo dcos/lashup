@@ -242,8 +242,16 @@ init_db(Nodes) ->
   TablesToCreate = Tables -- ExistingTables,
   Alltables = TablesToCreate ++ ExistingTables,
   lists:foreach(fun create_table/1, TablesToCreate),
-  ok = mnesia:wait_for_tables(Alltables, infinity),
-  ok = maybe_upgrade_table(ExistingTables).
+  case mnesia:wait_for_tables(Alltables, 60000) of
+    ok ->
+      ok = maybe_upgrade_table(ExistingTables);
+    {timeout, BadTables} ->
+      lager:alert("Couldn't initialize mnesia tables: ~p", [BadTables]),
+      init:stop(1);
+    {error, Error} ->
+      lager:alert("Couldn't initialize mnesia tables: ~p", [Error]),
+      init:stop(1)
+  end.
 
 create_table(Table) ->
   {atomic, ok} =  mnesia:create_table(Table, [
