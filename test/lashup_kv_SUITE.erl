@@ -9,14 +9,20 @@
 -module(lashup_kv_SUITE).
 
 -compile({parse_transform, lager_transform}).
--compile(export_all).
 
 -include("lashup_kv.hrl").
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
--export([all/0, init_per_suite/1, end_per_suite/1]).
+-export([
+    all/0,
+    init_per_suite/1, end_per_suite/1,
+    init_per_testcase/2, end_per_testcase/2,
+    upgrade_test/1,
+    fetch_keys/1,
+    kv_subscribe/1
+]).
 
 init_per_suite(Config) ->
   %% this might help, might not...

@@ -8,8 +8,6 @@
 %%%-------------------------------------------------------------------
 -module(lashup_hyparview_SUITE).
 -author("sdhillon").
--compile({parse_transform, lager_transform}).
--compile(export_all).
 
 -include_lib("common_test/include/ct.hrl").
 -export([all/0, init_per_testcase/2, end_per_testcase/2, init_per_suite/1, end_per_suite/1]).

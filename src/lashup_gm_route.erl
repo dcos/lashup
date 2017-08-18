@@ -49,7 +49,8 @@
   command/1,
   precondition/2,
   postcondition/3,
-  next_state/3
+  next_state/3,
+  verify_routes/2
 ]).
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -453,8 +454,6 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
   end.
 
 -ifdef(TEST).
--compile(export_all).
-
 
 proper_test_() ->
   {timeout,
