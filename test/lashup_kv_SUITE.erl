@@ -21,7 +21,8 @@
     init_per_testcase/2, end_per_testcase/2,
     upgrade_test/1,
     fetch_keys/1,
-    kv_subscribe/1
+    kv_subscribe/1,
+    remove_forgiving/1
 ]).
 
 init_per_suite(Config) ->
