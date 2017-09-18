@@ -1,6 +1,10 @@
 # Lashup
-[![Circle CI](https://circleci.com/gh/dcos/lashup.svg?style=svg&circle-token=e109b76cf8a017424100d9269640771210d7efe3)](https://circleci.com/gh/dcos/lashup)
-[![Velocity](http://velocity.mesosphere.com/service/velocity/buildStatus/icon?job=public-dcos-networking-lashup-master/)](http://velocity.mesosphere.com/service/velocity/job/public-dcos-networking-lashup-master/)
+[![CircleCI][circleci badge]][circleci]
+[![Coverage][coverage badge]][covercov]
+[![Jira][jira badge]][jira]
+[![License][license badge]][license]
+[![Erlang Versions][erlang version badge]][erlang]
+
 ## Summary 
 Lashup is a building block for a distributed control plane. It acts as a failure detector, a distributed fully-replicated CRDT store, and a multicast system. It isn't meant to be used by itself, but rather in conjunction with other components. In this it has several components described below. We currently use it in our [Minuteman Distributed Load Balancer](https://github.com/dcos/minuteman), and we've [publically evaluated](https://github.com/dcos/minuteman#evaluation) its capability for fault tolerance with Minuteman.
  
@@ -68,3 +72,16 @@ The simplest way to use the multicast API is to call: `lashup_gm_events:subscrib
 * TTL
 * only_nodes
 
+<!-- Badges -->
+[circleci badge]: https://img.shields.io/circleci/project/github/dcos/lashup/master.svg?style=flat-square
+[coverage badge]: https://img.shields.io/codecov/c/github/dcos/lashup/master.svg?style=flat-square
+[jira badge]: https://img.shields.io/badge/issues-jira-yellow.svg?style=flat-square
+[license badge]: https://img.shields.io/github/license/dcos/lashup.svg?style=flat-square
+[erlang version badge]: https://img.shields.io/badge/erlang-20.0-blue.svg?style=flat-square
+
+<!-- Links -->
+[circleci]: https://circleci.com/gh/dcos/lashup
+[covercov]: https://codecov.io/gh/dcos/lashup
+[jira]: https://jira.dcos.io/issues/?jql=component+%3D+networking+AND+project+%3D+DCOS_OSS
+[license]: ./LICENSE
+[erlang]: http://erlang.org/
