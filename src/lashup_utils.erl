@@ -86,14 +86,14 @@ compare_vclocks(V1, V2) ->
   DominatesGT = riak_dt_vclock:dominates(V1, V2),
   DominatesLT = riak_dt_vclock:dominates(V2, V1),
   Equal = riak_dt_vclock:equal(V1, V2),
-  if
-    DominatesGT ->
+  case {DominatesGT, DominatesLT, Equal} of
+    {true, _, _} ->
       gt;
-    DominatesLT ->
+    {_, true, _} ->
       lt;
-    Equal ->
+    {_, _, true} ->
       equal;
-    true ->
+    {_, _, _} ->
       concurrent
   end.
 
