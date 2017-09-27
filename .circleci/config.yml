@@ -1,0 +1,88 @@
+version: 2
+jobs:
+  build:
+    machine: true
+    working_directory: '~/dcos-net'
+    environment:
+      - OTP_VERSION: "20.0.5"
+      - OTP_DOWNLOAD_SHA256: "45b6966362c3a4da292d470ef25af9f91b851d4e96d3736abdabbba0556acf6c"
+    steps:
+      - checkout
+      - restore_cache:
+          key: otp-build-20.0.5
+      - run:
+          name: Building OTP
+          command: |
+              if [ -d ~/src/otp ]; then
+                  echo "Use pre-build OTP version"
+                  exit 0
+              fi
+
+              OTP_DOWNLOAD_URL="https://github.com/erlang/otp/archive/OTP-${OTP_VERSION}.tar.gz"
+
+              set -xe
+              curl -fSL -o otp-src.tar.gz "$OTP_DOWNLOAD_URL"
+              echo "$OTP_DOWNLOAD_SHA256  otp-src.tar.gz" | sha256sum -c -
+              mkdir -vp ~/src/otp
+              tar -xzf otp-src.tar.gz -C ~/src/otp --strip-components=1
+              rm otp-src.tar.gz
+              ( cd ~/src/otp \
+                && ./otp_build autoconf \
+                && ./configure \
+                && make -j$(getconf _NPROCESSORS_ONLN) )
+      - save_cache:
+          key: otp-build-20.0.5
+          paths:
+            - ~/src/otp
+      - run:
+          name: Installing OTP
+          command: (cd ~/src/otp && sudo make install)
+      - restore_cache:
+          key: machine-rebar3
+      - run:
+          name: Updating rebar3
+          command: ./rebar3 update
+      - restore_cache:
+          key: machine-rebar3-deps-{{ checksum "rebar.lock" }}
+      - run:
+          name: Fetching dependencies
+          command: ./rebar3 get-deps
+      - save_cache:
+          key: machine-rebar3-deps-{{ checksum "rebar.lock" }}
+          paths:
+            - _build/default/lib
+      - run:
+          name: Building
+          command: ./rebar3 compile
+      - run:
+          name: Checking eunit tests
+          command: ./rebar3 eunit -v
+      - run:
+          name: Checking common tests
+          command: ./rebar3 ct -v
+      - run:
+          name: Running cross reference analysis
+          command: ./rebar3 xref
+      - run:
+          name: Running static analyzer
+          command: ./rebar3 dialyzer
+      - run:
+          name: Checking code style
+          command: ./rebar3 as lint lint
+      - run:
+          name: Performing coverage analysis
+          command: ./rebar3 as test cover
+      - run:
+          name: Generating cover report
+          command: ./rebar3 covertool generate
+      - save_cache:
+          key: machine-rebar3
+          paths:
+            - ~/.cache/rebar3
+      - run:
+          name: Installing codecov
+          command: pip install codecov
+      - run:
+          name: Sending cover report
+          command: |
+              codecov -X gcov -f _build/test/covertool/lashup.covertool.xml

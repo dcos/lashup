@@ -46,15 +46,26 @@ init_per_testcase(TestCaseName, Config) ->
   {Masters, Slaves} = start_nodes(),
   {Pids, _} = rpc:multicall(Masters ++ Slaves, os, getpid, []),
   Config1 = proplists:delete(pid, Config),
-  [{masters, Masters}, {slaves, Slaves}, {pids, Pids} | Config1].
+  Dotter =
+    proc_lib:spawn_link(fun Dot() ->
+      receive
+        stop -> ok
+      after 5000 ->
+        io:put_chars(user, "."),
+        Dot()
+      end
+    end),
+  [{masters, Masters}, {slaves, Slaves}, {pids, Pids}, {dotter, Dotter} | Config1].
 
 
 end_per_testcase(ping_test, Config) ->
+  ?config(dotter, Config) ! stop,
   os:cmd("pkill -CONT -f beam.smp"),
   stop_nodes(?config(slaves, Config)),
   stop_nodes(?config(masters, Config));
 
 end_per_testcase(_, Config) ->
+  ?config(dotter, Config) ! stop,
   stop_nodes(?config(slaves, Config)),
   stop_nodes(?config(masters, Config)).
 
