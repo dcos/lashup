@@ -6,7 +6,7 @@
 %% API
 -export([start_link/1]).
 
--export([tx_sync/3, idle/3]).
+-export([init/3, tx_sync/3, idle/3]).
 
 %% Internal APIs
 -export([init/1, code_change/4, terminate/3, callback_mode/0]).
@@ -24,12 +24,15 @@ start_link(Node) ->
 init([Node]) ->
     case lists:member(Node, nodes()) of
         true ->
-            init2(Node);
+            {ok, init, [Node], {timeout, 0, init}};
         false ->
             {stop, node_disconnected}
     end.
 
-init2(Node) ->
+callback_mode() ->
+    state_functions.
+
+init(timeout, init, [Node]) ->
     case gen_server:call({lashup_kv, Node}, {start_kv_sync_fsm, node(), self()}) of
         {error, unknown_request} ->
             {stop, remote_node_no_aae};
@@ -40,11 +43,8 @@ init2(Node) ->
             MonitorRef = monitor(process, RemoteChildPid),
             StateData = #state{node = Node, monitor_ref = MonitorRef,
                 remote_pid = RemoteChildPid, lclock = LClock, maxclock = LClock},
-            {ok, tx_sync, StateData, [{next_event, internal, start_sync}]}
+            {next_state, tx_sync, StateData, [{next_event, internal, start_sync}]}
     end.
-
-callback_mode() ->
-    state_functions.
 
 tx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
