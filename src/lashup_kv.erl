@@ -129,6 +129,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  set_off_heap(),
   init_db(),
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?KV_TOPIC]),
@@ -239,6 +240,17 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(set_off_heap() -> on_heap | off_heap).
+set_off_heap() ->
+  try
+    % Garbage collection with many messages placed on the heap can become
+    % extremely expensive and the process can consume large amounts of memory.
+    erlang:process_flag(message_queue_data, off_heap)
+  catch error:badarg ->
+    % off_heap options is avaliable in OTP 20.0-rc2 and later
+    off_heap
+  end.
 
 %% Mostly borrowed from: https://github.com/ChicagoBoss/ChicagoBoss/wiki/Automatic-schema-initialization-for-mnesia
 -spec(init_db() -> ok).
