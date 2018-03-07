@@ -192,8 +192,15 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
-  State1 = handle_lashup_gm_mc_event(Event, State),
-  {noreply, State1};
+  MaxMsgQueueLen = application:get_env(lashup, max_message_queue_len, 32),
+  case erlang:process_info(self(), message_queue_len) of
+    {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+      lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
+      {noreply, State};
+    {message_queue_len, _MsgQueueLen} ->
+      State1 = handle_lashup_gm_mc_event(Event, State),
+      {noreply, State1}
+  end;
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
