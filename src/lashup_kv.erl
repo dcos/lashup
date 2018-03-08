@@ -43,6 +43,7 @@
 
 -define(WARN_OBJECT_SIZE_MB, 60).
 -define(REJECT_OBJECT_SIZE_MB, 100).
+-define(MAX_MESSAGE_QUEUE_LEN, 32).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -67,13 +68,22 @@
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, Op) ->
-  gen_server:call(?SERVER, {op, Key, Op}, infinity).
+  request_op(Key, undefined, Op).
 
-
--spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock(), Op :: riak_dt_map:map_op()) ->
+-spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  gen_server:call(?SERVER, {op, Key, VClock, Op}, infinity).
+  Pid = whereis(?SERVER),
+  Args = {op, Key, VClock, Op},
+  MaxMsgQueueLen = max_message_queue_len(),
+  try erlang:process_info(Pid, message_queue_len) of
+    {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+      {error, overflow};
+    {message_queue_len, _MsgQueueLen} ->
+      gen_server:call(Pid, Args, infinity)
+  catch error:badarg ->
+    exit({noproc, {gen_server, call, [?SERVER, Args]}})
+  end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
 keys(MatchSpec) ->
@@ -120,6 +130,7 @@ start_link() ->
   {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
   {stop, Reason :: term()} | ignore).
 init([]) ->
+  set_off_heap(),
   init_db(),
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?KV_TOPIC]),
@@ -143,9 +154,6 @@ init([]) ->
   {stop, Reason :: term(), NewState :: state()}).
 handle_call({op, Key, VClock, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, VClock, State),
-  {reply, Reply, State1};
-handle_call({op, Key, Op}, _From, State) ->
-  {Reply, State1} = handle_op(Key, Op, undefined, State),
   {reply, Reply, State1};
 handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
   Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
@@ -186,8 +194,15 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
-  State1 = handle_lashup_gm_mc_event(Event, State),
-  {noreply, State1};
+  MaxMsgQueueLen = max_message_queue_len(),
+  case erlang:process_info(self(), message_queue_len) of
+    {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+      lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
+      {noreply, State};
+    {message_queue_len, _MsgQueueLen} ->
+      State1 = handle_lashup_gm_mc_event(Event, State),
+      {noreply, State1}
+  end;
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
@@ -226,6 +241,21 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(max_message_queue_len() -> pos_integer()).
+max_message_queue_len() ->
+  application:get_env(lashup, max_message_queue_len, ?MAX_MESSAGE_QUEUE_LEN).
+
+-spec(set_off_heap() -> on_heap | off_heap).
+set_off_heap() ->
+  try
+    % Garbage collection with many messages placed on the heap can become
+    % extremely expensive and the process can consume large amounts of memory.
+    erlang:process_flag(message_queue_data, off_heap)
+  catch error:badarg ->
+    % off_heap options is avaliable in OTP 20.0-rc2 and later
+    off_heap
+  end.
 
 %% Mostly borrowed from: https://github.com/ChicagoBoss/ChicagoBoss/wiki/Automatic-schema-initialization-for-mnesia
 -spec(init_db() -> ok).
