@@ -43,6 +43,7 @@
 
 -define(WARN_OBJECT_SIZE_MB, 60).
 -define(REJECT_OBJECT_SIZE_MB, 100).
+-define(MAX_MESSAGE_QUEUE_LEN, 32).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -74,12 +75,12 @@ request_op(Key, Op) ->
 request_op(Key, VClock, Op) ->
   Pid = whereis(?SERVER),
   Args = {op, Key, VClock, Op},
-  MaxMsgQueueLen = application:get_env(lashup, max_message_queue_len, 32),
+  MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
     {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
       {error, overflow};
     {message_queue_len, _MsgQueueLen} ->
-      gen_server:call(?SERVER, Args, infinity)
+      gen_server:call(Pid, Args, infinity)
   catch error:badarg ->
     exit({noproc, {gen_server, call, [?SERVER, Args]}})
   end.
@@ -193,7 +194,7 @@ handle_cast(_Request, State) ->
   {noreply, NewState :: state(), timeout() | hibernate} |
   {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
-  MaxMsgQueueLen = application:get_env(lashup, max_message_queue_len, 32),
+  MaxMsgQueueLen = max_message_queue_len(),
   case erlang:process_info(self(), message_queue_len) of
     {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
@@ -240,6 +241,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(max_message_queue_len() -> pos_integer()).
+max_message_queue_len() ->
+  application:get_env(lashup, max_message_queue_len, ?MAX_MESSAGE_QUEUE_LEN).
 
 -spec(set_off_heap() -> on_heap | off_heap).
 set_off_heap() ->
