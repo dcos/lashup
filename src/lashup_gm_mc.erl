@@ -346,13 +346,11 @@ maybe_forward_packet(_MulticastPacket = #{ttl := 0}, _State) ->
   lager:warning("TTL Exceeded on Multicast Packet"),
   ok;
 maybe_forward_packet(MulticastPacket0 = #{tree := Tree, ttl := TTL, options := Options}, State) ->
-  exometer:update([lashup_gm_mc, with_tree], 1),
   MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
   MulticastPacket2 = lists:foldl(fun maybe_add_forwarding_options/2, MulticastPacket1, Options),
   forward_packet(MulticastPacket2, Tree, State);
 maybe_forward_packet(MulticastPacket0 = #{fakeroot := FakeRoot, ttl := TTL, origin := Origin, options := Options},
     State) ->
-  exometer:update([lashup_gm_mc, without_tree], 1),
   case lashup_gm_route:get_tree(FakeRoot) of
     {tree, Tree} ->
       MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
@@ -381,8 +379,7 @@ bsend(MulticastPacket, Children) ->
     fun(Child) ->
       case erlang:send({?SERVER, Child}, MulticastPacket, [noconnect]) of
         noconnect ->
-          lager:warning("Dropping packet due to stale tree"),
-          exometer:update([lashup_gm_mc, drop_noconnect], 1);
+          lager:warning("Dropping packet due to stale tree");
         _ ->
           ok
       end

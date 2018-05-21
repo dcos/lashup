@@ -1,17 +1,14 @@
-{application, lashup,
- [
-  {description, "Lashup - Distributed control plane"},
-  {vsn, "1"},
-  {registered, []},
-  {maintainers, ["Sargun Dhillon <sargun@mesosphere.com", "Tyler Neely <tyler@mesosphere.com>"]},
-  {licenses, ["Apache"]},
-  {applications, [
-                  kernel,
-                  stdlib,
-                  lager,
-                  riak_dt,
-                  exometer_core
-                 ]},
-  {mod, { lashup_app, []}},
-  {env, []}
- ]}.
+{application, lashup, [
+    {description, "Distributed control plane"},
+    {vsn, "0.1"},
+    {registered, []},
+    {licenses, ["Apache"]},
+    {applications, [
+        kernel,
+        stdlib,
+        lager,
+        riak_dt
+    ]},
+    {mod, {lashup_app, []}},
+    {env, []}
+]}.
