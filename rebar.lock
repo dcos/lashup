@@ -1,5 +1,7 @@
 {"1.1.0",
-[{<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.9">>},1},
+[{<<"bear">>,{pkg,<<"bear">>,<<"0.8.5">>},1},
+ {<<"folsom">>,{pkg,<<"folsom">>,<<"0.8.5">>},0},
+ {<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.9">>},1},
  {<<"lager">>,{pkg,<<"lager">>,<<"3.6.5">>},0},
  {<<"riak_dt">>,
   {git,"https://github.com/dcos/riak_dt.git",
@@ -7,6 +9,8 @@
   0}]}.
 [
 {pkg_hash,[
+ {<<"bear">>, <<"E95FCA1627CD9E15BAF93CE0A52AFF16917BAF325F0EE65B88CD715376CD2344">>},
+ {<<"folsom">>, <<"94A027B56FE84FEED264F9B33CB4C6AC9A801FAD84B87DBDA0836CE83C3B8D69">>},
  {<<"goldrush">>, <<"F06E5D5F1277DA5C413E84D5A2924174182FB108DABB39D5EC548B27424CD106">>},
  {<<"lager">>, <<"831910109F3FCB503DEBF658CA0538836B348C58BFBF349A6D48228096CE9040">>}]}
 ].
