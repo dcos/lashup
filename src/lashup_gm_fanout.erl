@@ -1,13 +1,8 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 17. Jan 2016 3:44 PM
-%%%-------------------------------------------------------------------
 -module(lashup_gm_fanout).
 -author("sdhillon").
+
+-include_lib("stdlib/include/ms_transform.hrl").
+-include("lashup.hrl").
 
 %% Lashup GM fanout is the global membership fanout system
 %% It is composed of three components
@@ -17,12 +12,20 @@
 
 %% The actual fan-out is handled by lashup_gm
 
--include_lib("stdlib/include/ms_transform.hrl").
--include("lashup.hrl").
-
 %% API
--export([start_monitor/1, init/1]).
--record(state, {parent, receiver, receiver_mon, parent_mon, node}).
+-export([
+    start_monitor/1,
+    init/1
+]).
+
+-record(state, {
+    parent,
+    receiver,
+    receiver_mon,
+    parent_mon,
+    node
+}).
+
 
 start_monitor(Node) ->
   State = #state{receiver = self(), node = Node},

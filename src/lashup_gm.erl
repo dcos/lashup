@@ -1,23 +1,14 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 15. Jan 2016 2:56 AM
-%%%-------------------------------------------------------------------
-
-%% TODO: Get rid of DVVSet, and move to a pruneable datastructure
-
-
 -module(lashup_gm).
 -author("sdhillon").
-
-
 -behaviour(gen_server).
 
+-include_lib("kernel/include/inet.hrl").
+-include_lib("stdlib/include/ms_transform.hrl").
+-include("lashup.hrl").
+
 %% API
--export([start_link/0,
+-export([
+  start_link/0,
   get_subscriptions/0,
   gm/0,
   get_neighbor_recommendations/1,
@@ -27,21 +18,21 @@
 ]).
 
 %% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2,
+  handle_info/2, terminate/2, code_change/3]).
 
--define(SERVER, ?MODULE).
+-record(subscriber, {
+    monitor_ref,
+    node,
+    pid
+}).
 
--include_lib("kernel/include/inet.hrl").
--include_lib("stdlib/include/ms_transform.hrl").
--include("lashup.hrl").
+-record(subscription, {
+    node,
+    pid,
+    monitor_ref
+}).
 
--record(subscriber, {monitor_ref, node, pid}).
--record(subscription, {node, pid, monitor_ref}).
 -record(state, {
   subscriptions = [],
   epoch = erlang:error() :: non_neg_integer(),
@@ -52,20 +43,15 @@
 
 -type state() :: #state{}.
 
-%%%===================================================================
-%%% API
-%%%===================================================================
-
-
 %% @doc
+%% TODO: Get rid of DVVSet, and move to a pruneable datastructure
 %% Timeout here is limited to 500 ms, and not less
 %% empirically, dumping 1000 nodes pauses lashup_gm for ~300 ms.
 %% So we bumped this up to sit above that. We should decrease it when we get a chance
 %% because lashup_hyparview_membership depends on it not pausing for a long time
 
-
 get_neighbor_recommendations(ActiveViewSize) ->
-  gen_server:call(?SERVER, {get_neighbor_recommendations, ActiveViewSize}, 500).
+  gen_server:call(?MODULE, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
 %% @doc Looks up a node in ets
 lookup_node(Node) ->
@@ -80,7 +66,7 @@ gm() ->
   get_membership().
 
 get_subscriptions() ->
-  gen_server:call(?SERVER, get_subscriptions).
+  gen_server:call(?MODULE, get_subscriptions).
 
 id() ->
   node().
@@ -89,35 +75,15 @@ id(Node) ->
   Node.
 
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%%
-%% @spec init(Args) -> {ok, State} |
-%%                     {ok, State, Timeout} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
--spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
-  {stop, Reason :: term()} | ignore).
 init([]) ->
   rand:seed(exsplus),
   %% TODO: Add jitter
@@ -130,21 +96,6 @@ init([]) ->
   timer:send_interval(3600 * 1000, trim_nodes),
   {ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_call(gm, _From, State) ->
   {reply, get_membership(), State};
 handle_call({subscribe, Pid}, _From, State) ->
@@ -162,17 +113,6 @@ handle_call(Request, _From, State) ->
   lager:debug("Received unknown request: ~p", [Request]),
   {reply, ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_cast({compressed, Data}, State) when is_binary(Data) ->
   Data1 = binary_to_term(Data),
   handle_cast(Data1, State);
@@ -190,21 +130,6 @@ handle_cast(update_node, State) ->
 handle_cast(Request, State) ->
   lager:debug("Received unknown cast: ~p", [Request]),
   {noreply, State}.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @spec handle_info(Info, State) -> {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 
 handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_reference(MonitorRef) ->
   State1 = prune_subscribers(MonitorRef, State),
@@ -224,34 +149,10 @@ handle_info(Info, State) ->
   lager:debug("Unknown info: ~p", [Info]),
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State) -> void()
-%% @end
-%%--------------------------------------------------------------------
--spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:debug("Lashup_GM terminated, because: ~p, in state: ~p", [Reason, State]),
   ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
-%% @end
-%%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
-  Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
@@ -480,7 +381,7 @@ trim_nodes(State) ->
 
 update_node_backoff_loop(Delay, Pid) ->
   timer:sleep(Delay),
-  Backoff = gen_server:call(?SERVER, update_node, infinity),
+  Backoff = gen_server:call(?MODULE, update_node, infinity),
   update_node_backoff_loop(Backoff, Pid).
 
 prune_subscribers(MonitorRef, State = #state{subscribers = Subscribers}) ->

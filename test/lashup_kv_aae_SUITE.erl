@@ -2,10 +2,7 @@
 
 -compile({parse_transform, lager_transform}).
 
--include("lashup_kv.hrl").
-
 -include_lib("common_test/include/ct.hrl").
--include_lib("stdlib/include/ms_transform.hrl").
 
 -export([
     all/0,
@@ -98,8 +95,8 @@ configure_mnesia_dir(Node, Config) ->
 start_nodes(Config) ->
     Timeout = boot_timeout(),
     Results = rpc:pmap({ct_slave, start}, [[{monitor_master, true},
-        {boot_timeout, Timeout}, {init_timeout, Timeout}, 
-        {startup_timeout, Timeout}, {erl_flags, "-connect_all false"}]], 
+        {boot_timeout, Timeout}, {init_timeout, Timeout},
+        {startup_timeout, Timeout}, {erl_flags, "-connect_all false"}]],
         masters() ++ agents()),
     io:format("Starting nodes: ~p", [Results]),
     Nodes = [NodeName || {ok, NodeName} <- Results],
@@ -172,6 +169,6 @@ lashup_kv_aae_test(Config) ->
     timer:sleep(?WAIT),
     %% Master should reset the clock only after 2 min
     1 = rpc:call(Master, lashup_kv, dirty_get_lclock, [Agent]),
-    timer:sleep(?WAIT), % wait for 1 more min 
+    timer:sleep(?WAIT), % wait for 1 more min
     %% Verify that Master resetted the clock for the agent
     -1 = rpc:call(Master, lashup_kv, dirty_get_lclock, [Agent]).

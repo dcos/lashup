@@ -1,20 +1,18 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
 %%% @doc
 %%% An LSA routing database (RIB) routing information base
 %%% It has a cache that makes it suitable for a FIB
-%%%
 %%% @end
-%%% Created : 05. Feb 2016 6:14 PM
-%%%-------------------------------------------------------------------
+%%%
 %%% TODO:
 %%% -Determine whether it makes more sense to stash the graph in a sofs
 %%% -Determine whether it makes sense to use sofs rather than maps to store the BFS trees
+
 -module(lashup_gm_route).
 -author("sdhillon").
 
 -compile(inline).
+
+-include_lib("stdlib/include/ms_transform.hrl").
 
 -behaviour(gen_statem).
 
@@ -39,10 +37,13 @@
 
 
 -ifdef(TEST).
+
+-include_lib("proper/include/proper.hrl").
+-include_lib("eunit/include/eunit.hrl").
+
 -behaviour(proper_statem).
 
 -export([proper/0]).
-
 -export([
   initial_state/0,
   stop/0,
@@ -52,21 +53,12 @@
   next_state/3,
   verify_routes/2
 ]).
--include_lib("proper/include/proper.hrl").
--include_lib("eunit/include/eunit.hrl").
+
 -endif.
 
 %% gen_statem callbacks
--export([
-  init/1,
-  terminate/3,
-  code_change/4,
-  callback_mode/0,
-  handle_event/4
-]).
-
-
--define(SERVER, ?MODULE).
+-export([init/1, terminate/3, code_change/4,
+  callback_mode/0, handle_event/4]).
 
 -record(state, {
   events = 0 :: non_neg_integer(),
@@ -90,11 +82,10 @@
   children = ordsets:new() :: ordsets:ordset(node())
 }).
 
--include_lib("stdlib/include/ms_transform.hrl").
-
 %%%===================================================================
 %%% API
 %%%===================================================================
+
 %% TODO:
 %% -Add reachable by node
 %% -Add reachable by IP
@@ -105,11 +96,11 @@
 %% @end
 -spec(update_node(Node :: node(), Dsts :: [node()]) -> ok).
 update_node(Node, Dsts)  ->
-  gen_statem:cast(?SERVER, {update_node, Node, Dsts}).
+  gen_statem:cast(?MODULE, {update_node, Node, Dsts}).
 
 -spec(delete_node(Node :: node()) -> ok).
 delete_node(Node) ->
-  gen_statem:cast(?SERVER, {delete_node, Node}).
+  gen_statem:cast(?MODULE, {delete_node, Node}).
 
 %% @doc
 %% Checks the reachability from this node to node Node
@@ -160,7 +151,7 @@ get_tree(Node) ->
 
 -spec(get_tree(Node :: node(), Timeout :: non_neg_integer() | infinity) -> {tree, tree()} | false).
 get_tree(Node, Timeout) ->
-  gen_statem:call(?SERVER, {get_tree, Node}, Timeout).
+  gen_statem:call(?MODULE, {get_tree, Node}, Timeout).
 
 -spec(distance(Node :: node(), Tree :: tree()) -> non_neg_integer() | infinity).
 distance(Node, Tree) ->
@@ -226,18 +217,12 @@ prune_tree(Node, Tree, PrunedTree) ->
   end.
 
 flush_events_helper() ->
-  gen_statem:cast(?SERVER, flush_events_helper).
+  gen_statem:cast(?MODULE, flush_events_helper).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_statem:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_statem:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -251,7 +236,6 @@ init([]) ->
 
 callback_mode() ->
   handle_event_function.
-
 
 %% Get tree logic
 handle_event({call, From}, {get_tree, Node}, cached, StateData0) when Node == node() ->
@@ -298,7 +282,6 @@ handle_event(cast, {update_node, Node, Dsts}, _StateName, StateData0) ->
 handle_event(cast, {delete_node, Node}, _StateName, StateData0) ->
   StateData1 = handle_delete_node(Node, StateData0),
   {next_state, dirty_tree, StateData1, [{next_event, internal, maybe_advertise_state}]}.
-
 
 terminate(Reason, State, Data = #state{}) ->
   lager:warning("Terminating in State: ~p, due to reason: ~p, with data: ~p", [State, Reason, Data]),
@@ -350,7 +333,6 @@ handle_delete_node(Node, State0) ->
   State1 = handle_delete_node(Node, ets:first(vertices), State0),
   bust_cache(State1).
 
-
 -spec(handle_delete_node(DstNode :: node(), CurNode :: node() | '$end_of_table', State :: state()) -> state()).
 handle_delete_node(_DstNode, '$end_of_table', State) -> State;
 handle_delete_node(DstNode, CurNode, State) ->
@@ -385,7 +367,6 @@ neighbors(Node) ->
 persist_node(Node) ->
   Vertex = #vertex{node = Node},
   ets:insert_new(vertices, Vertex).
-
 
 %% @doc
 %% Build the tree representation for Node = root
@@ -490,7 +471,9 @@ get_short_path(_State = #{family := Family}, A, B) ->
   Result.
 
 
-  -define(NODES, [node(), node1@localhost, node2@localhost, node3@localhost,
+-define(NODES, [
+  node(),
+  node1@localhost, node2@localhost, node3@localhost,
   node4@localhost, node5@localhost, node6@localhost,
   node7@localhost, node8@localhost, node9@localhost,
   node10@localhost, node11@localhost, node12@localhost,
@@ -498,10 +481,10 @@ get_short_path(_State = #{family := Family}, A, B) ->
   node16@localhost, node17@localhost, node18@localhost,
   node19@localhost, node20@localhost, node21@localhost,
   node22@localhost, node23@localhost, node24@localhost,
-  node25@localhost]).
+  node25@localhost
+]).
 
 precondition(_State, _Call) -> true.
-
 
 postcondition(_State, {call, ?MODULE, reachable, [Node]}, Result) when Node == node() ->
   true == Result;
@@ -539,7 +522,6 @@ postcondition(State, {call, ?MODULE, verify_routes, [FromNode, ToNode]}, Result)
   end;
 postcondition(_State, _Call, _Result) -> true.
 
-
 next_state(State, _V,
     {call, gen_statem, call, [lashup_gm_route, {update_node, Node, NewNodes}]}) ->
   Digraph = state_to_digraph(State),
@@ -562,7 +544,6 @@ next_state(State, _V, _Call) ->
 node_gen() ->
   oneof(?NODES).
 
-
 node_gen_list(Except) ->
   list(elements(?NODES -- [Except])).
 
@@ -576,8 +557,6 @@ verify_routes(FromNode, ToNode) ->
     {tree, Tree} ->
       path_to(ToNode, Tree)
   end.
-
-
 
 command(_S) ->
   oneof([
@@ -601,7 +580,6 @@ prop_server_works_fine() ->
       end)).
 
 stop() ->
-  gen_statem:stop(?SERVER).
+  gen_statem:stop(?MODULE).
 
 -endif.
-

@@ -1,21 +1,9 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 07. Feb 2016 6:16 PM
-%%%-------------------------------------------------------------------
-
-%% TODO:
-%% -Add VClock pruning
-
 -module(lashup_kv).
 -author("sdhillon").
-
 -behaviour(gen_server).
 
 -include_lib("stdlib/include/ms_transform.hrl").
+-include("lashup_kv.hrl").
 
 %% API
 -export([
@@ -29,41 +17,21 @@
 ]).
 
 %% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2,
+  handle_info/2, terminate/2, code_change/3]).
 
 -export_type([key/0]).
 
--define(SERVER, ?MODULE).
 -define(INIT_LCLOCK, -1).
-
 -define(WARN_OBJECT_SIZE_MB, 60).
 -define(REJECT_OBJECT_SIZE_MB, 100).
 -define(MAX_MESSAGE_QUEUE_LEN, 32).
+-define(KV_TOPIC, lashup_kv_20161114).
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
 }).
 
-
--include("lashup_kv.hrl").
--type kv() :: #kv2{}.
--type state() :: #state{}.
--type nclock() :: #nclock{}.
--type lclock() :: non_neg_integer().
--type tables() :: list().
-
--export_type([kv/0]).
-
--define(KV_TOPIC, lashup_kv_20161114).
-
-%%%===================================================================
-%%% API
-%%%===================================================================
 
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
@@ -73,7 +41,7 @@ request_op(Key, Op) ->
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  Pid = whereis(?SERVER),
+  Pid = whereis(?MODULE),
   Args = {op, Key, VClock, Op},
   MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
@@ -82,7 +50,7 @@ request_op(Key, VClock, Op) ->
     {message_queue_len, _MsgQueueLen} ->
       gen_server:call(Pid, Args, infinity)
   catch error:badarg ->
-    exit({noproc, {gen_server, call, [?SERVER, Args]}})
+    exit({noproc, {gen_server, call, [?MODULE, Args]}})
   end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
@@ -100,35 +68,15 @@ value2(Key) ->
   {_, KV} = op_getkv(Key),
   {riak_dt_map:value(KV#kv2.map), KV#kv2.vclock}.
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%%
-%% @spec init(Args) -> {ok, State} |
-%%                     {ok, State, Timeout} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
--spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
-  {stop, Reason :: term()} | ignore).
 init([]) ->
   set_off_heap(),
   init_db(),
@@ -137,21 +85,6 @@ init([]) ->
   State = #state{mc_ref = Reference},
   {ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_call({op, Key, VClock, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, VClock, State),
   {reply, Reply, State1};
@@ -161,17 +94,6 @@ handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From,
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 %% A maybe update from the sync FSM
 handle_cast({maybe_update, Key, VClock, Map}, State0) ->
   State1 = handle_full_update(#{key => Key, vclock => VClock, map => Map}, State0),
@@ -179,20 +101,6 @@ handle_cast({maybe_update, Key, VClock, Map}, State0) ->
 handle_cast(_Request, State) ->
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @spec handle_info(Info, State) -> {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
   MaxMsgQueueLen = max_message_queue_len(),
   case erlang:process_info(self(), message_queue_len) of
@@ -207,36 +115,22 @@ handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State) -> void()
-%% @end
-%%--------------------------------------------------------------------
--spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:debug("Terminating for reason: ~p, in state: ~p", [Reason, lager:pr(State, ?MODULE)]),
   ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
-%% @end
-%%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
-  Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%%%===================================================================
+%%% Internal types
+%%%===================================================================
+
+-type kv() :: #kv2{}.
+-type state() :: #state{}.
+-type nclock() :: #nclock{}.
+-type lclock() :: non_neg_integer().
+-type tables() :: list().
 
 %%%===================================================================
 %%% Internal functions
@@ -373,6 +267,7 @@ prepare_kv(Key, Map0, VClock0, Op) ->
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
     State :: state()) -> {Reply :: term(), State1 :: state()}.
 handle_op(Key, Op, OldVClock, State) ->
+  %% We really want to make sure this persists and we don't have backwards traveling clocks
   Fun = mk_write_fun(Key, OldVClock, Op),
   case mnesia:sync_transaction(Fun) of
     {atomic, NewKV} ->
@@ -384,10 +279,6 @@ handle_op(Key, Op, OldVClock, State) ->
     {aborted, Reason} ->
       {{error, Reason}, State}
   end.
-  %% We really want to make sure this persists and we don't have backwards traveling clocks
-
-
-
 
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).

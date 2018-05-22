@@ -1,12 +1,8 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
 %%% @doc
 %%% This module is launched when dump_events is called to start the process of syncing the gm data between the two nodes
 %%% It's a temporary worker, unlike lashup_gm_fanout
 %%% @end
-%%% Created : 04. Feb 2016 10:00 PM
-%%%-------------------------------------------------------------------
+
 -module(lashup_gm_sync_worker).
 -author("sdhillon").
 
@@ -14,12 +10,17 @@
 -include("lashup.hrl").
 
 %% API
--export([handle/1, start_link/1, do_handle/1]).
+-export([
+    handle/1,
+    start_link/1,
+    do_handle/1
+]).
 
-%%%===================================================================
-%%% API
-%%%===================================================================
--record(state, {fanout_pid, nodes_checked = []}).
+-record(state, {
+    fanout_pid,
+    nodes_checked = []
+}).
+
 
 handle(Pid) ->
   Args = #{lashup_gm_fanout_pid => Pid},
@@ -31,24 +32,24 @@ handle(Pid) ->
   supervisor:start_child(lashup_gm_worker_sup, ChildSpec).
 
 
-
-%% @private
 start_link(Args) ->
   Opts = [link, {priority, low}],
   %% Basically never full sweep, because the process dies pretty quickly
   Pid = proc_lib:spawn_opt(?MODULE, do_handle, [Args], Opts),
   {ok, Pid}.
 
-%% @private
+
 do_handle(#{lashup_gm_fanout_pid := Pid}) ->
   link(Pid),
   State = #state{fanout_pid = Pid},
   start_exchange(State).
 
+
 start_exchange(State) ->
   Message = #{type => aae_keys, pid => self()},
   State#state.fanout_pid ! Message,
   do_exchange(State).
+
 
 do_exchange(State) ->
   receive

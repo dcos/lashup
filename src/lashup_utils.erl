@@ -1,11 +1,3 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 14. Jan 2016 8:59 PM
-%%%-------------------------------------------------------------------
 -module(lashup_utils).
 -author("sdhillon").
 
@@ -25,13 +17,13 @@
   read_file/1
 ]).
 
+-export_type([window/0]).
+
 -record(window, {
   samples = [] :: list(integer()),
   window_time = 0 :: non_neg_integer()}).
-
 -type window() :: #window{}.
 
--export_type([window/0]).
 
 -spec(seed() -> rand:state()).
 seed() ->
@@ -51,7 +43,6 @@ shuffle_list(List, FixedSeed) ->
       List),
   PrefixedListSorted = lists:sort(PrefixedList),
   [Value || {_N, Value} <- PrefixedListSorted].
-
 
 -spec shuffle_list(List) -> List1 when
   List :: [T, ...],
@@ -97,7 +88,6 @@ compare_vclocks(V1, V2) ->
       concurrent
   end.
 
-
 -spec(subtract(List1, List2) -> Set when
   List1 :: [Type, ...],
   List2 :: [Type, ...],
@@ -116,8 +106,6 @@ subtract(List1, List2) ->
   List2Set = ordsets:from_list(List2),
   ordsets:subtract(List1Set, List2Set).
 
-
-
 %% Borrowed from: https://github.com/basho/riak_ensemble/blob/develop/src/riak_ensemble_util.erl
 -spec replace_file(file:filename(), iodata()) -> ok | {error, term()}.
 replace_file(FN, Data) ->
@@ -134,7 +122,6 @@ replace_file(FN, Data) ->
   catch _:Err ->
     {error, Err}
   end.
-
 
 %%===================================================================
 
@@ -165,7 +152,3 @@ read_file(FD, Acc) ->
     {error, _} = Err ->
       Err
   end.
-
-
-
-

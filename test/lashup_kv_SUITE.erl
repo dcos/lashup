@@ -1,11 +1,3 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 08. Mar 2016 8:06 AM
-%%%-------------------------------------------------------------------
 -module(lashup_kv_SUITE).
 
 -compile({parse_transform, lager_transform}).
