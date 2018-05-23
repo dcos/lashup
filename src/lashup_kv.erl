@@ -75,57 +75,77 @@ request_op(Key, VClock, Op) ->
   MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
     {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+      m_notify(overflowed, {inc, 1}, counter),
       {error, overflow};
     {message_queue_len, _MsgQueueLen} ->
-      gen_server:call(Pid, Args, infinity)
+      m_notify(writes, {inc, 1}, counter),
+      m_notify_ms(write_ms, fun () ->
+        gen_server:call(Pid, Args, infinity)
+      end)
   catch error:badarg ->
     exit({noproc, {gen_server, call, [?MODULE, Args]}})
   end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
 keys(MatchSpec) ->
-  op_getkeys(MatchSpec).
+  m_notify(reads, {inc, 1}, counter),
+  m_notify_ms(read_ms, fun () ->
+    op_getkeys(MatchSpec)
+  end).
 
 -spec(value(Key :: key()) -> riak_dt_map:value()).
 value(Key) ->
-  {_, KV} = op_getkv(Key),
-  riak_dt_map:value(KV#kv2.map).
-
+  {Value, _VClock} = value2(Key),
+  Value.
 
 -spec(value2(Key :: key()) -> {riak_dt_map:value(), riak_dt_vclock:vclock()}).
 value2(Key) ->
-  {_, KV} = op_getkv(Key),
-  {riak_dt_map:value(KV#kv2.map), KV#kv2.vclock}.
+  m_notify(reads, {inc, 1}, counter),
+  m_notify_ms(read_ms, fun () ->
+    {_, KV} = op_getkv(Key),
+    {riak_dt_map:value(KV#kv2.map), KV#kv2.vclock}
+  end).
 
 -spec(raw_value(key()) -> kv2raw() | false).
 raw_value(Key) ->
-  case mnesia:dirty_read(?KV_TABLE, Key) of
-    [#kv2{map=Map, vclock=VClock, lclock=LClock}] ->
-      #{key => Key, value => Map, vclock => VClock, lclock => LClock};
-    [] -> false
-  end.
+  m_notify(reads, {inc, 1}, counter),
+  m_notify_ms(read_ms, fun () ->
+    case mnesia:dirty_read(?KV_TABLE, Key) of
+      [#kv2{map=Map, vclock=VClock, lclock=LClock}] ->
+        #{key => Key, value => Map, vclock => VClock, lclock => LClock};
+      [] -> false
+    end
+  end).
 
 -spec(descends(key(), riak_dt_vclock:vclock()) -> boolean()).
 descends(Key, VClock) ->
   %% Check if LocalVClock is a direct descendant of the VClock
-  case mnesia:dirty_read(?KV_TABLE, Key) of
-    [] -> false;
-    [#kv2{vclock = LocalVClock}] ->
-      riak_dt_vclock:descends(LocalVClock, VClock)
-  end.
+  m_notify(reads, {inc, 1}, counter),
+  m_notify_ms(read_ms, fun () ->
+    case mnesia:dirty_read(?KV_TABLE, Key) of
+      [] -> false;
+      [#kv2{vclock = LocalVClock}] ->
+        riak_dt_vclock:descends(LocalVClock, VClock)
+    end
+  end).
 
 -spec(subscribe(ets:match_spec()) -> {ok, ets:comp_match_spec(), [kv2map()]}).
 subscribe(MatchSpec) ->
-  ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
-  mnesia:subscribe({table, ?KV_TABLE, detailed}),
-  MatchSpecKV2 = matchspec_kv2(MatchSpec),
-  Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
-  {ok, ets:match_spec_compile(MatchSpecKV2),
-   lists:map(fun kv2map/1, Records)}.
+  m_notify(reads, {inc, 1}, counter),
+  m_notify_ms(read_ms, fun () ->
+    ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
+    mnesia:subscribe({table, ?KV_TABLE, detailed}),
+    MatchSpecKV2 = matchspec_kv2(MatchSpec),
+    Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
+    ok = m_notify_subscribers(),
+    {ok, ets:match_spec_compile(MatchSpecKV2),
+     lists:map(fun kv2map/1, Records)}
+  end).
 
 -spec(handle_event(ets:comp_match_spec(), Event) -> false | kv2map()
     when Event :: {write, ?KV_TABLE, kv(), [kv()], any()}).
 handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
+  m_notify(reads, {inc, 1}, counter),
   case ets:match_spec_run([New], Spec) of
     [New] -> kv2map(New, OldRecords);
     [] -> false
@@ -133,10 +153,12 @@ handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
 
 -spec(first_key() -> key() | '$end_of_table').
 first_key() ->
+  m_notify(reads, {inc, 1}, counter),
   mnesia:dirty_first(?KV_TABLE).
 
 -spec(next_key(key()) -> key() | '$end_of_table').
 next_key(Key) ->
+  m_notify(reads, {inc, 1}, counter),
   mnesia:dirty_next(?KV_TABLE, Key).
 
 -spec(read_lclock(node()) -> lclock()).
@@ -145,18 +167,22 @@ read_lclock(Node) ->
 
 -spec(write_lclock(node(), lclock()) -> ok | {error, term()}).
 write_lclock(Node, LClock) ->
-  Fun = fun () -> mnesia:write(#nclock{key = Node, lclock = LClock}) end,
-  case mnesia:sync_transaction(Fun) of
-    {atomic, _} ->
-      ok;
-    {aborted, Reason} ->
-      lager:error("Couldn't write to nclock table because ~p", [Reason]),
-      {error, Reason}
-  end.
+  m_notify(writes, {inc, 1}, counter),
+  m_notify_ms(write_ms, fun () ->
+    Fun = fun () -> mnesia:write(#nclock{key = Node, lclock = LClock}) end,
+    case mnesia:sync_transaction(Fun) of
+      {atomic, _} ->
+        ok;
+      {aborted, Reason} ->
+        lager:error("Couldn't write to nclock table because ~p", [Reason]),
+        {error, Reason}
+    end
+  end).
 
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
+  init_metrics(),
   gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
@@ -191,6 +217,7 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
   MaxMsgQueueLen = max_message_queue_len(),
   case erlang:process_info(self(), message_queue_len) of
     {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+      m_notify(overflowed, {inc, 1}, counter),
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
       {noreply, State};
     {message_queue_len, _MsgQueueLen} ->
@@ -252,7 +279,7 @@ init_db(Nodes) ->
   lists:foreach(fun create_table/1, TablesToCreate),
   case mnesia:wait_for_tables(Alltables, 60000) of
     ok ->
-      ok;
+      ok = m_notify_size();
     {timeout, BadTables} ->
       lager:alert("Couldn't initialize mnesia tables: ~p", [BadTables]),
       init:stop(1);
@@ -322,10 +349,12 @@ handle_op(Key, Op, OldVClock, State) ->
     {atomic, NewKV} ->
       ok = mnesia:sync_log(),
       dumped = mnesia:dump_log(),
+      ok = m_notify_size(),
       propagate(NewKV),
       NewValue = riak_dt_map:value(NewKV#kv2.map),
       {{ok, NewValue}, State};
     {aborted, Reason} ->
+      ok = m_notify_size(),
       {{error, Reason}, State}
   end.
 
@@ -445,9 +474,13 @@ create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
 
 -spec(handle_full_update(map(), state()) -> state()).
 handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
-  Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
-  {atomic, _} = mnesia:sync_transaction(Fun),
-  State.
+  m_notify(full_updates, {inc, 1}, counter),
+  m_notify_ms(full_update_ms, fun () ->
+    Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
+    {atomic, _} = mnesia:sync_transaction(Fun),
+    ok = m_notify_size(),
+    State
+  end).
 
 increment_lclock(N) ->
   N + 1.
@@ -470,3 +503,45 @@ kv2map(New, [Old | _]) ->
   Map = kv2map(New),
   #{value := OldValue} = kv2map(Old),
   Map#{old_value => OldValue}.
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-define(METRIC(Key), {lashup, kv, Key}).
+-define(SLIDE_WINDOW, 5). % seconds
+-define(SLIDE_SIZE, 1024).
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  lists:foreach(fun (Key) ->
+    _ = folsom_metrics:new_histogram(
+          ?METRIC(Key), slide_uniform,
+          {?SLIDE_WINDOW, ?SLIDE_SIZE})
+  end, [full_update_ms, read_ms, write_ms]).
+
+-spec(m_notify(Key :: atom(), Value :: any(), Type :: atom()) -> ok).
+m_notify(Key, Value, Type) ->
+  folsom_metrics:notify(?METRIC(Key), Value, Type).
+
+-spec(m_notify_ms(Key, Fun :: fun (() -> A)) -> A
+  when Key :: atom(), A :: any()).
+m_notify_ms(Key, Fun) ->
+  Begin = erlang:monotonic_time(millisecond),
+  try
+    Fun()
+  after
+    Ms = erlang:monotonic_time(millisecond) - Begin,
+    true = folsom_metrics_histogram:update(?METRIC(Key), Ms)
+  end.
+
+-spec(m_notify_size() -> ok).
+m_notify_size() ->
+  WordSize = erlang:system_info(wordsize),
+  Size = WordSize * mnesia:table_info(kv2, memory),
+  m_notify(size, Size, gauge).
+
+-spec(m_notify_subscribers() -> ok).
+m_notify_subscribers() ->
+    Subscribers = mnesia:table_info(?KV_TABLE, subscribers),
+    m_notify(subscribers, length(Subscribers), gauge).
