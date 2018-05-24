@@ -103,11 +103,17 @@ finish_sync(RemotePID) ->
     erlang:garbage_collect(self()),
     %% This is to ensure that all messages have flushed
     Message = #{from => self(), message => done},
+    folsom_metrics:notify({lashup, aae, tx, messages}, {inc, 1}, counter),
+    folsom_metrics:notify({lashup, aae, tx, bytes},
+                          {inc, erlang:external_size(Message)}, counter),
     erlang:send(RemotePID, Message, [noconnect]).
 
 send_key_vclock(Key, RemotePID) ->
     #{vclock := VClock, lclock := KeyClock} = lashup_kv:raw_value(Key),
     Message = #{from => self(), key => Key, vclock => VClock, message => keydata},
+    folsom_metrics:notify({lashup, aae, tx, messages}, {inc, 1}, counter),
+    folsom_metrics:notify({lashup, aae, tx, bytes},
+                          {inc, erlang:external_size(Message)}, counter),
     erlang:send(RemotePID, Message, [noconnect]),
     KeyClock.
 

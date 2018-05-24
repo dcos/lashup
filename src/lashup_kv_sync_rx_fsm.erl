@@ -35,10 +35,14 @@ terminate(Reason, State, _Data) ->
     lager:warning("KV AAE RX FSM terminated (~p): ~p", [State, Reason]).
 
 
-rx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
+rx_sync(info,
+        Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info},
+        #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
-rx_sync(info, #{key := Key, from := RemotePID, message := keydata, vclock := VClock},
+rx_sync(info,
+        Message = #{key := Key, from := RemotePID, message := keydata, vclock := VClock},
         StateData = #state{remote_pid = RemotePID}) ->
+    m_notify(Message),
     case lashup_kv:descends(Key, VClock) of
         false ->
             lager:debug("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
@@ -47,9 +51,12 @@ rx_sync(info, #{key := Key, from := RemotePID, message := keydata, vclock := VCl
             ok
     end,
     keep_state_and_data;
-rx_sync(info, #{from := RemotePID, message := done}, #state{remote_pid = RemotePID}) ->
-    Message = #{from => self(), message => rx_sync_complete},
-    erlang:send(RemotePID, Message, [noconnect]),
+rx_sync(info,
+        Message = #{from := RemotePID, message := done},
+        #state{remote_pid = RemotePID}) ->
+    m_notify(Message),
+    Reply = #{from => self(), message => rx_sync_complete},
+    erlang:send(RemotePID, Reply, [noconnect]),
     erlang:garbage_collect(self()),
     keep_state_and_data;
 rx_sync(info, #{from := RemotePID}, #state{remote_pid = RemotePID}) ->
@@ -70,3 +77,8 @@ handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
     lager:warning("Lashup AAE TX Process disconnected: ~p", [Reason]),
     {stop, normal}.
+
+m_notify(Message) ->
+    folsom_metrics:notify({lashup, aae, rx, messages}, {inc, 1}, counter),
+    folsom_metrics:notify({lashup, aae, rx, bytes},
+                          {inc, erlang:external_size(Message)}, counter).
