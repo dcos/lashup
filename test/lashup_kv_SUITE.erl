@@ -2,8 +2,6 @@
 
 -compile({parse_transform, lager_transform}).
 
--include("lashup_kv.hrl").
-
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -70,9 +68,9 @@ fix_mnesia(MnesiaDir) ->
 upgrade_test(_Config) ->
  Fun = fun() -> mnesia:foldl(fun check_record/2, [], kv2) end,
  {atomic, _} = mnesia:transaction(Fun),
- ok. 
+ ok.
 
-check_record(#kv2{lclock = 0}, _) ->
+check_record(_, _) ->
  ok.
 
 fetch_keys(_Config) ->
