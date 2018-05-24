@@ -3,7 +3,6 @@
 -behaviour(gen_server).
 
 -include_lib("stdlib/include/ms_transform.hrl").
--include("lashup_kv.hrl").
 
 %% API
 -export([
@@ -27,21 +26,36 @@
 -export([init/1, handle_call/3, handle_cast/2,
   handle_info/2, terminate/2, code_change/3]).
 
--export_type([key/0, kv2map/0, kv2raw/0]).
+-export_type([key/0, lclock/0, kv2map/0, kv2raw/0]).
 
+-define(KV_TABLE, kv2).
 -define(INIT_LCLOCK, -1).
 -define(WARN_OBJECT_SIZE_MB, 60).
 -define(REJECT_OBJECT_SIZE_MB, 100).
 -define(MAX_MESSAGE_QUEUE_LEN, 32).
 -define(KV_TOPIC, lashup_kv_20161114).
 
+-record(kv2, {
+  key = erlang:error() :: key() | '_',
+  map = riak_dt_map:new() :: riak_dt_map:dt_map() | '_',
+  vclock = riak_dt_vclock:fresh() :: riak_dt_vclock:vclock() | '_',
+  lclock = 0 :: lclock() | '_'
+}).
+
+-record(nclock, {
+  key :: node(),
+  lclock :: lclock()
+}).
+
+-type key() :: term().
+-type lclock() :: non_neg_integer(). % logical clock
 -type kv2map() :: #{key => key(),
                     value => riak_dt_map:value(),
                     old_value => riak_dt_map:value()}.
 -type kv2raw() :: #{key => key(),
                     value => term(),
                     vclock => riak_dt_vclock:vclock(),
-                    lclock => non_neg_integer()}.
+                    lclock => lclock()}.
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
@@ -201,8 +215,6 @@ code_change(_OldVsn, State, _Extra) ->
 -type kv() :: #kv2{}.
 -type state() :: #state{}.
 -type nclock() :: #nclock{}.
--type lclock() :: non_neg_integer().
--type tables() :: list().
 
 %%%===================================================================
 %%% Internal functions
@@ -240,7 +252,7 @@ init_db(Nodes) ->
   lists:foreach(fun create_table/1, TablesToCreate),
   case mnesia:wait_for_tables(Alltables, 60000) of
     ok ->
-      ok = maybe_upgrade_table(ExistingTables);
+      ok;
     {timeout, BadTables} ->
       lager:alert("Couldn't initialize mnesia tables: ~p", [BadTables]),
       init:stop(1);
@@ -260,41 +272,6 @@ get_record_info(kv2) ->
   record_info(fields, kv2);
 get_record_info(nclock) ->
   record_info(fields, nclock).
-
--spec(maybe_upgrade_table(tables()) -> ok|aborted).
-maybe_upgrade_table(ExistingTables) ->
-  case {lists:member(?KV_TABLE, ExistingTables), lists:member(?OLD_KV_TABLE, ExistingTables)} of
-    {true, _} ->
-        ok; %% already upgraded
-    {false, false} ->
-        ok; %% nothing to upgrade
-    {false, true} ->
-        upgrade_table(kv)
-  end.
-
--spec(upgrade_table(kv) -> ok|aborted).
-upgrade_table(kv) ->
-  F = fun() ->
-        LClock = mnesia:foldl(fun convert_and_write_record/2, ?INIT_LCLOCK, ?OLD_KV_TABLE),
-        NClock = #nclock{key = node(), lclock = LClock},
-        mnesia:write(NClock)
-      end,
-  case mnesia:sync_transaction(F) of
-    {atomic, _} ->
-      ok = mnesia:sync_log();
-    {aborted, Reason} ->
-      lager:error("Failed to upgrade kv table because ~p", [Reason]),
-      aborted
-  end.
-
-convert_and_write_record(Record0, Counter0) ->
-    Counter1 = Counter0 + 1,
-    Record1 = convert_record(Record0, Counter1),
-    mnesia:write(Record1),
-    Counter1.
-
-convert_record(_R = #kv{key = Key, vclock = VClock, map = Map}, Counter) ->
-  #kv2{key = Key, vclock = VClock, map = Map, lclock = Counter}.
 
 -spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined,
       Op :: riak_dt_map:map_op()) -> (fun())).
