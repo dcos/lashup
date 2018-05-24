@@ -137,6 +137,7 @@ subscribe(MatchSpec) ->
     mnesia:subscribe({table, ?KV_TABLE, detailed}),
     MatchSpecKV2 = matchspec_kv2(MatchSpec),
     Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
+    ok = m_notify(events, {inc, length(Records)}, counter),
     ok = m_notify_subscribers(),
     {ok, ets:match_spec_compile(MatchSpecKV2),
      lists:map(fun kv2map/1, Records)}
@@ -145,7 +146,7 @@ subscribe(MatchSpec) ->
 -spec(handle_event(ets:comp_match_spec(), Event) -> false | kv2map()
     when Event :: {write, ?KV_TABLE, kv(), [kv()], any()}).
 handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
-  m_notify(reads, {inc, 1}, counter),
+  m_notify(events, {inc, 1}, counter),
   case ets:match_spec_run([New], Spec) of
     [New] -> kv2map(New, OldRecords);
     [] -> false
