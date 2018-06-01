@@ -55,7 +55,8 @@
   neighbor_interval/0,
   min_ping_ms/0,
   max_ping_ms/0,
-  ping_log_base/0
+  ping_log_base/0,
+  aae_route_event_wait/0
 ]).
 
 %% @doc
@@ -185,6 +186,10 @@ max_ping_ms() ->
 -spec(ping_log_base() -> float()).
 ping_log_base() ->
   get_env(ping_log_base, ?DEFAULT_LOG_BASE).
+
+-spec(aae_route_event_wait() -> non_neg_integer()).
+aae_route_event_wait() ->
+  get_env(aae_route_event_wait, 120000). % 2 min
 
 get_env(Var, Default) ->
   application:get_env(lashup, Var, Default).
