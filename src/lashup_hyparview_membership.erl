@@ -689,7 +689,7 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
     %% Let's try to reconnect to the contact nodes
     {ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
-      lager:debug("Trying to connect to connect to node from passive view, but passive view empty"),
+      lager:debug("Trying to connect to node from passive view, but passive view empty"),
       ContactNodes = ordsets:from_list(contact_nodes(State)),
       UnconnectedContactNodes = ordsets:subtract(ContactNodes, ActiveView),
       State#state{passive_view = UnconnectedContactNodes};
