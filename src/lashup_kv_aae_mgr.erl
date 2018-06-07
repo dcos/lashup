@@ -15,6 +15,8 @@
 %% API
 -export([start_link/0]).
 
+-include("lashup_kv.hrl").
+
 %% gen_server callbacks
 -export([init/1,
     handle_call/3,
@@ -27,7 +29,12 @@
 %% A node must be connected for 30 seconds before we attempt AAE
 -define(AAE_AFTER, 30000).
 
--record(state, {hyparview_event_ref, active_view = []}).
+-record(state, {
+    hyparview_event_ref,
+    route_event_ref,
+    route_event_timer_ref = make_ref(),
+    active_view = []
+}).
 -type state() :: #state{}.
 
 %%%===================================================================
@@ -65,8 +72,9 @@ start_link() ->
     {stop, Reason :: term()} | ignore).
 init([]) ->
     {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
+    {ok, RouteEventsRef} = lashup_gm_route_events:subscribe(),
     timer:send_after(0, refresh),
-    {ok, #state{hyparview_event_ref = HyparviewEventsRef}}.
+    {ok, #state{hyparview_event_ref = HyparviewEventsRef, route_event_ref = RouteEventsRef}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -119,6 +127,14 @@ handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, 
     State1 = State0#state{active_view = ActiveView},
     refresh(ActiveView),
     {noreply, State1};
+handle_info({lashup_gm_route_events, #{ref := Ref}},
+            State = #state{route_event_ref = Ref, route_event_timer_ref = TimerRef}) ->
+    erlang:cancel_timer(TimerRef),
+    TimerRef0 = start_route_event_timer(),
+    {noreply, State#state{route_event_timer_ref = TimerRef0}};
+handle_info({timeout, Ref, route_event}, State = #state{route_event_timer_ref = Ref}) ->
+    State0 = handle_route_event(State),
+    {noreply, State0};
 handle_info(refresh, State = #state{active_view = ActiveView}) ->
     refresh(ActiveView),
     timer:send_after(lashup_config:aae_neighbor_check_interval(), refresh),
@@ -180,4 +196,22 @@ maybe_start_child(Child, ActiveView) ->
         false ->
             ok
     end.
-    %lists:foreach(fun lashup_kv_aae_sup:start_aae/1, ChildrenToStart).
+
+handle_route_event(State) ->
+    case lashup_gm_route:get_tree(node()) of
+        {tree, Tree} ->
+            UnreachableNodes = lashup_gm_route:unreachable_nodes(Tree),
+            lager:info("Purging nclock for nodes: ~p", [UnreachableNodes]),
+            lists:foreach(fun(Node) ->
+                              mnesia:dirty_delete(nclock, Node)
+                          end,
+                          UnreachableNodes),
+            State;
+         Error ->
+            lager:warning("get_tree() call failed ~p", [Error]),
+            TimerRef = start_route_event_timer(),
+            State#state{route_event_timer_ref = TimerRef}
+    end.
+
+start_route_event_timer() ->
+    erlang:start_timer(lashup_config:aae_route_event_wait(), self(), route_event).
