@@ -126,6 +126,7 @@ init([]) ->
 handle_call(stop, _From, State) ->
   {stop, normal, State};
 handle_call({update_masters, Nodes}, _From, State = #state{extra_masters = ExtraMasters}) ->
+  folsom_metrics:notify({lashup, hyparview, masters}, length(Nodes), gauge),
   Nodes0 = ordsets:from_list(Nodes),
   State0 =
     case ordsets:del_element(node(), Nodes0) of
@@ -152,7 +153,8 @@ handle_call(try_shuffle, _From, State) ->
 handle_cast({do_probe, Node}, State) ->
   State1 = handle_do_probe(Node, State),
   {noreply, check_state(State1)};
-handle_cast(Message = #{message := _}, State) ->
+handle_cast(Message = #{message := Type}, State) ->
+  folsom_metrics:notify({lashup, hyparview, messages, Type}, {inc, 1}, counter),
   State1 = handle_message_cast(Message, State),
   {noreply, State1};
 handle_cast({recognize_pong, Pong}, State) ->
@@ -736,6 +738,8 @@ check_monitors(#state{active_view = ActiveView, monitors = Monitors}) ->
 
 -spec(check_views(state()) -> ok).
 check_views(_State = #state{active_view = ActiveView, passive_view = PassiveView}) ->
+  folsom_metrics:notify({lashup, hyparview, active_view}, length(ActiveView), gauge),
+  folsom_metrics:notify({lashup, hyparview, passive_view}, length(PassiveView), gauge),
   case ordsets:intersection(PassiveView, ActiveView) of
     [] ->
       ok;

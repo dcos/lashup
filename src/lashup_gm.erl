@@ -447,5 +447,6 @@ persist(Member, _State) ->
       ets:insert(members, Member),
       lashup_gm_events:ingest(Member)
   end,
+  Size = ets:info(members, size),
+  folsom_metrics:notify({lashup, hyparview, members}, Size, gauge).
   %% Find the component I'm part of
-  ok.
