@@ -511,6 +511,7 @@ create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
 handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
   Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
   {atomic, _} = mnesia:sync_transaction(Fun),
+  lager:warning("Did full update for key ~p", [Key]),
   State.
 
 increment_lclock(N) ->

@@ -42,7 +42,7 @@ rx_sync(info, Message = #{key := Key, from := RemotePID, message := keydata},
         StateData = #state{remote_pid = RemotePID}) ->
     case check_key(Message) of
         true ->
-            lager:debug("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
+            lager:warning("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
             request_key(Key, StateData);
         false ->
             ok

@@ -79,6 +79,7 @@ maybe_process_event(NewRecord = #kv2{key = Key}, OldRecords, State = #state{matc
 send_event(_NewRecord = #kv2{key = Key, map = Map}, [], #state{ref = Ref, pid = Pid}) ->
   Value = riak_dt_map:value(Map),
   Event = #{type => ingest_new, key => Key, ref => Ref, value => Value},
+  lager:warning("Sending event ~p", [Event]),
   Pid ! {lashup_kv_events, Event},
   ok;
 send_event(_NewRecord = #kv2{key = Key, map = Map} = _NewRecords,
