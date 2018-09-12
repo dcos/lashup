@@ -22,7 +22,7 @@ The core of Lashup is the overlay builder. This is a strongly connected, sparse 
 
 Atop the overlay, we have a routing and failure detection layer. Each node in the Lashup network distributes its adjacencies to every other node in the system, and these are stored in memory. We found that at 1000 nodes, the typical size of this database is under 50 mb. The *fan-out* is set to **6** based on some static tunables in the overlay layer. Whenever there are changes to a given node's adjacency table, it gossips them throughout the network.
 
-The nodes also check the health of one another. The health-check algorithm is an adaptive algorithm. We set the initial expected round trip time to 1 second. We then proceed to ping every one of our adjacencies every second. The historical round trip times are cached, and we use a logarithmic scale to determine how long future round trips should take. If a node fails to respond, we immediately disconnect it, and propagate that information through the gossip. At this point, all of the nodes that are also connected to that node proceed to check its health. This results in typical sub-second failure detection. If the overlay is unstable, the ping intervals are naturally elevated, and therefore inhibit rejection of nodes from the overlay.
+The nodes also check the health of one another. The health-check algorithm is an adaptive algorithm. We set the initial expected round trip time to 1 second. We then proceed to ping every one of our adjacencies every second. The historical round trip times are cached, and we use a logarithmic scale to determine how long future round trips should take. If a node fails to respond, we immediately disconnect it, and propagate that information through the gossip protocol. At this point, all of the nodes that are also connected to that node proceed to check its health. This results in typical sub-second failure detection. If the overlay is unstable, the ping intervals are naturally elevated, and therefore inhibit rejection of nodes from the overlay.
 
 Once we have this adjacency table, we then run a depth-first search on it to build a minimum spanning tree. This minimum spanning tree then becomes a mechanism to build sender-rooted multicast messages.
 
@@ -34,9 +34,9 @@ The data is also persisted to disk via Mnesia. Mnesia was chosen due to its reli
 
 ## Background
 
-Lashup is an underlying infrastructure project of Minuteman. It enables Minuteman to determine the list of available backends to fulfill a connection request. In the context of project Peacekeeper, Lashup could disseminate the list of available IP and port endpoints. The system has to have strong availability performance properties, and availability properties. It is also known as the "Event Fabric".
+Lashup is an underlying infrastructure project of Minuteman. It enables Minuteman to determine the list of available backends to fulfill a connection request. In the context of project Peacekeeper, Lashup could disseminate the list of available IP and port endpoints. The system has to have strong availability performance properties, and high-availability properties. It is also known as the "Event Fabric".
 
-Lashup runs on every agent in a cluster. Most of the information needed can be derived from a Mesos agent's `TaskInfo` and `TaskStatus` records.  Therefore, the initial goal of Lashup is to advertise up-to-date task records of an agent. In addition to this, it must replicate this state to all other nodes running Lashup. This can be modeled as a key-value system, where every agent has its own namespace, only it can write to, and other agents can read from. The estimate of the information used from a `TaskInfo` record is likely to be under a kilobyte, and the `TaskStatus` size is likely to be under 512 bytes. Efficiencies can be taken in order to advertise only mutations, such as the work from the [Delta-CRDT paper](http://arxiv.org/abs/1410.2803).
+Lashup runs on every agent in a cluster. Most of the information needed can be derived from a Mesos agent's `TaskInfo` and `TaskStatus` records.  Therefore, the initial goal of Lashup is to advertise up-to-date task records of an agent. In addition to this, it must replicate this state to all other nodes running Lashup. This can be modeled as a key-value system, where every agent has its own namespace, only it can write to, and other agents can read from. The estimate of the size of the information used from a `TaskInfo` record is likely to be under a kilobyte, and the `TaskStatus` size is likely to be under 512 bytes. Efficiencies can be taken in order to advertise only mutations, such as the work from the [Delta-CRDT paper](http://arxiv.org/abs/1410.2803).
 
 Since this information is used to make routing decisions, it must be disseminated in a timely manner. Lashup should provide strong guarantees about timely convergence not only under partial failure, but typical operating conditions. Although it is not a strong requirement, Lashup should also provide a mechanism to determine whether a replica (an agent) has entirely failed to avoid sending requests to it. It is likely that a different mechanism will have to be used for state dissemination versus liveness checking.
 
@@ -50,7 +50,7 @@ We need a failure detector that's quick to converge (less than 1.5 seconds for d
 
 ### Detecting failures
 
-The first obvious use-case for Lashup is to detect agent failures in the system. If we're sending traffic to a node via a load balancing mechanism, we can react to node failures faster than Mesos (10M) or other mechanisms can detect failure by using techniques like gossip, and indirect health checks. Alternatively, DCOS takes advantage of Mesos, which can have slow periods for detecting faults.
+The first obvious use-case for Lashup is to detect agent failures in the system. If we're sending traffic to a node via a load balancing mechanism, we can react to node failures faster than Mesos (10M) or other mechanisms can detect failure by using techniques like gossip, and indirect health-checks. Alternatively, DCOS takes advantage of Mesos, which can have slow periods for detecting faults.
 
 ### Publishing VIPs
 
@@ -58,7 +58,7 @@ The second use-case for Lashup is to publish VIPs for Minuteman. These VIPs are 
 
 ### Powering Novel Load Balancing Algorithms
 
-Once there is a reliable failure detector, and a mechanism to disseminate data, it can be extended. Although we could trivially implement the local least connections, or global random balancing algorithm, such algorithms are quite often not the ideal mechanism for interactive web services. There is one algorithm that serves the purpose better: Microsoft's [Join-Idle-Queue](http://research.microsoft.com/apps/pubs/default.aspx?id=153348). It effectively requires a mechanism to expose queue depth to routers. Other algorithms, such as performance-based routing require very small amounts of metadata to be exposed, with very short update periods.
+Once there is a reliable failure detector, and a mechanism to disseminate data, it can be extended. Although we could trivially implement the local least connections, or global random balancing algorithms, such algorithms are quite often not the ideal mechanism for interactive web services. There is one algorithm that serves the purpose better: Microsoft's [Join-Idle-Queue](http://research.microsoft.com/apps/pubs/default.aspx?id=153348). It effectively requires a mechanism to expose queue depth to routers. Other algorithms, such as performance-based routing require very small amounts of metadata to be exposed, with very short update periods.
 
 ### Security
 
@@ -68,11 +68,11 @@ In such a distributed filtering system, there is also a requirement to distribut
 
 ## Usage
 
-Integrating Lashup into your own project is easy! You must set the configuration, `{mnesia, dir}` for the KV store to persist its data, and the `{lashup, work_dir}` to persist the Lamport clock used in the gossip algorithm. You must also configure contact nodes via `{lashup, contact_nodes}`. These nodes are used to bootstrap the overlay. At least one of them must be up for the new node to join.
+Integrating Lashup into your own project is easy! You must set the configuration, `{mnesia, dir}` for the KV store to persist its data, and the `{lashup, work_dir}` to persist the Lamport clock used in the gossip algorithm. You must also configure contact nodes via `{lashup, contact_nodes}`. These nodes are used to bootstrap the overlay. At least one of them must be up for a new node to join.
 
 ### Membership
 
-You can get the global membership snapshot by calling `lashup_gm:gm()`. If you're interested in finding out about changes in the global membership, you can subscribe to the `lashup_gm_events` `gen_event`. If you're interested in finding out reachability information, you can call `lashup_gm_route:get_tree(Origin)` to get the DFS tree from `Origin`. It returns a map, where the key is the destination node name, and the value is either the distance from the given origin, or `infinity`, if the node is unreachable.
+You can get the global membership snapshot by calling `lashup_gm:gm()`. If you're interested in finding out about changes in the global membership, you can subscribe to the `lashup_gm_events` `gen_event`. If you're interested in finding out reachability information, you can call `lashup_gm_route:get_tree(Origin)` to get the DFS tree from `Origin`. It returns a map, where the key is a destination node name, and the value is either the distance from the given origin, or `infinity`, if the node is unreachable.
 
 ### Key-Value Store
 
