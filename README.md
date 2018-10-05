@@ -100,7 +100,7 @@ The simplest way to use the multicast API is to call `lashup_gm_events:subscribe
 [coverage badge]: https://img.shields.io/codecov/c/github/dcos/lashup/master.svg?style=flat-square
 [jira badge]: https://img.shields.io/badge/issues-jira-yellow.svg?style=flat-square
 [license badge]: https://img.shields.io/github/license/dcos/lashup.svg?style=flat-square
-[erlang version badge]: https://img.shields.io/badge/erlang-20.1-blue.svg?style=flat-square
+[erlang version badge]: https://img.shields.io/badge/erlang-21.x-blue.svg?style=flat-square
 
 <!-- Links -->
 [circleci]: https://circleci.com/gh/dcos/lashup

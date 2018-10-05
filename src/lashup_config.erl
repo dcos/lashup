@@ -1,13 +1,6 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2015, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 28. Dec 2015 10:59 AM
-%%%-------------------------------------------------------------------
 -module(lashup_config).
 -author("sdhillon").
+
 %% These are the constants for the sizes of views from the lashup paper
 -define(K, 6).
 

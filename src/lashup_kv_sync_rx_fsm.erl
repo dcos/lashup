@@ -12,7 +12,6 @@
 
 -export([rx_sync/3]).
 
--include("lashup_kv.hrl").
 -record(state, {node, monitor_ref, remote_pid}).
 
 
@@ -38,13 +37,13 @@ terminate(Reason, State, _Data) ->
 
 rx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
-rx_sync(info, Message = #{key := Key, from := RemotePID, message := keydata},
+rx_sync(info, #{key := Key, from := RemotePID, message := keydata, vclock := VClock},
         StateData = #state{remote_pid = RemotePID}) ->
-    case check_key(Message) of
-        true ->
+    case lashup_kv:descends(Key, VClock) of
+        false ->
             lager:debug("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
             request_key(Key, StateData);
-        false ->
+        true ->
             ok
     end,
     keep_state_and_data;
@@ -57,20 +56,6 @@ rx_sync(info, #{from := RemotePID}, #state{remote_pid = RemotePID}) ->
     Message = #{from => self(), message => unknown},
     erlang:send(RemotePID, Message, [noconnect]),
     keep_state_and_data.
-
-check_key(#{key := Key, vclock := RemoteVClock}) ->
-    case mnesia:dirty_read(?KV_TABLE, Key) of
-        [] ->
-            true;
-        [#kv2{vclock = LocalVClock}] ->
-            %% Check if the local VClock is a direct descendant of the remote vclock
-            case riak_dt_vclock:descends(LocalVClock, RemoteVClock) of
-                true ->
-                    false;
-                false ->
-                    true
-            end
-    end.
 
 request_key(Key, #state{remote_pid = RemotePID}) ->
     #{vclock := VClock, value := Map} = gen_statem:call(RemotePID, {request_key, Key}),
@@ -85,4 +70,3 @@ handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
     lager:warning("Lashup AAE TX Process disconnected: ~p", [Reason]),
     {stop, normal}.
-

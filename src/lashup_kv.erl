@@ -1,18 +1,5 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 07. Feb 2016 6:16 PM
-%%%-------------------------------------------------------------------
-
-%% TODO:
-%% -Add VClock pruning
-
 -module(lashup_kv).
 -author("sdhillon").
-
 -behaviour(gen_server).
 
 -include_lib("stdlib/include/ms_transform.hrl").
@@ -25,45 +12,55 @@
   keys/1,
   value/1,
   value2/1,
-  dirty_get_lclock/1
+  raw_value/1,
+  descends/2,
+  subscribe/1,
+  handle_event/2,
+  first_key/0,
+  next_key/1,
+  read_lclock/1,
+  write_lclock/2
 ]).
 
 %% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2,
+  handle_info/2, terminate/2, code_change/3]).
 
--export_type([key/0]).
+-export_type([key/0, lclock/0, kv2map/0, kv2raw/0]).
 
--define(SERVER, ?MODULE).
+-define(KV_TABLE, kv2).
 -define(INIT_LCLOCK, -1).
-
 -define(WARN_OBJECT_SIZE_MB, 60).
 -define(REJECT_OBJECT_SIZE_MB, 100).
 -define(MAX_MESSAGE_QUEUE_LEN, 32).
+-define(KV_TOPIC, lashup_kv_20161114).
+
+-record(kv2, {
+  key = erlang:error() :: key() | '_',
+  map = riak_dt_map:new() :: riak_dt_map:dt_map() | '_',
+  vclock = riak_dt_vclock:fresh() :: riak_dt_vclock:vclock() | '_',
+  lclock = 0 :: lclock() | '_'
+}).
+
+-record(nclock, {
+  key :: node(),
+  lclock :: lclock()
+}).
+
+-type key() :: term().
+-type lclock() :: non_neg_integer(). % logical clock
+-type kv2map() :: #{key => key(),
+                    value => riak_dt_map:value(),
+                    old_value => riak_dt_map:value()}.
+-type kv2raw() :: #{key => key(),
+                    value => term(),
+                    vclock => riak_dt_vclock:vclock(),
+                    lclock => lclock()}.
 
 -record(state, {
   mc_ref = erlang:error() :: reference()
 }).
 
-
--include("lashup_kv.hrl").
--type kv() :: #kv2{}.
--type state() :: #state{}.
--type nclock() :: #nclock{}.
--type lclock() :: non_neg_integer().
--type tables() :: list().
-
--export_type([kv/0]).
-
--define(KV_TOPIC, lashup_kv_20161114).
-
-%%%===================================================================
-%%% API
-%%%===================================================================
 
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
@@ -73,7 +70,7 @@ request_op(Key, Op) ->
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  Pid = whereis(?SERVER),
+  Pid = whereis(?MODULE),
   Args = {op, Key, VClock, Op},
   MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
@@ -82,7 +79,7 @@ request_op(Key, VClock, Op) ->
     {message_queue_len, _MsgQueueLen} ->
       gen_server:call(Pid, Args, infinity)
   catch error:badarg ->
-    exit({noproc, {gen_server, call, [?SERVER, Args]}})
+    exit({noproc, {gen_server, call, [?MODULE, Args]}})
   end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
@@ -100,35 +97,72 @@ value2(Key) ->
   {_, KV} = op_getkv(Key),
   {riak_dt_map:value(KV#kv2.map), KV#kv2.vclock}.
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
-%%--------------------------------------------------------------------
+-spec(raw_value(key()) -> kv2raw() | false).
+raw_value(Key) ->
+  case mnesia:dirty_read(?KV_TABLE, Key) of
+    [#kv2{map=Map, vclock=VClock, lclock=LClock}] ->
+      #{key => Key, value => Map, vclock => VClock, lclock => LClock};
+    [] -> false
+  end.
+
+-spec(descends(key(), riak_dt_vclock:vclock()) -> boolean()).
+descends(Key, VClock) ->
+  %% Check if LocalVClock is a direct descendant of the VClock
+  case mnesia:dirty_read(?KV_TABLE, Key) of
+    [] -> false;
+    [#kv2{vclock = LocalVClock}] ->
+      riak_dt_vclock:descends(LocalVClock, VClock)
+  end.
+
+-spec(subscribe(ets:match_spec()) -> {ok, ets:comp_match_spec(), [kv2map()]}).
+subscribe(MatchSpec) ->
+  ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
+  mnesia:subscribe({table, ?KV_TABLE, detailed}),
+  MatchSpecKV2 = matchspec_kv2(MatchSpec),
+  Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
+  {ok, ets:match_spec_compile(MatchSpecKV2),
+   lists:map(fun kv2map/1, Records)}.
+
+-spec(handle_event(ets:comp_match_spec(), Event) -> false | kv2map()
+    when Event :: {write, ?KV_TABLE, kv(), [kv()], any()}).
+handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
+  case ets:match_spec_run([New], Spec) of
+    [New] -> kv2map(New, OldRecords);
+    [] -> false
+  end.
+
+-spec(first_key() -> key() | '$end_of_table').
+first_key() ->
+  mnesia:dirty_first(?KV_TABLE).
+
+-spec(next_key(key()) -> key() | '$end_of_table').
+next_key(Key) ->
+  mnesia:dirty_next(?KV_TABLE, Key).
+
+-spec(read_lclock(node()) -> lclock()).
+read_lclock(Node) ->
+  get_lclock(fun mnesia:dirty_read/2, Node).
+
+-spec(write_lclock(node(), lclock()) -> ok | {error, term()}).
+write_lclock(Node, LClock) ->
+  Fun = fun () -> mnesia:write(#nclock{key = Node, lclock = LClock}) end,
+  case mnesia:sync_transaction(Fun) of
+    {atomic, _} ->
+      ok;
+    {aborted, Reason} ->
+      lager:error("Couldn't write to nclock table because ~p", [Reason]),
+      {error, Reason}
+  end.
+
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%%
-%% @spec init(Args) -> {ok, State} |
-%%                     {ok, State, Timeout} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
--spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
-  {stop, Reason :: term()} | ignore).
 init([]) ->
   set_off_heap(),
   init_db(),
@@ -137,21 +171,6 @@ init([]) ->
   State = #state{mc_ref = Reference},
   {ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_call({op, Key, VClock, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, VClock, State),
   {reply, Reply, State1};
@@ -161,17 +180,6 @@ handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From,
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 %% A maybe update from the sync FSM
 handle_cast({maybe_update, Key, VClock, Map}, State0) ->
   State1 = handle_full_update(#{key => Key, vclock => VClock, map => Map}, State0),
@@ -179,20 +187,6 @@ handle_cast({maybe_update, Key, VClock, Map}, State0) ->
 handle_cast(_Request, State) ->
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @spec handle_info(Info, State) -> {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
   MaxMsgQueueLen = max_message_queue_len(),
   case erlang:process_info(self(), message_queue_len) of
@@ -207,36 +201,20 @@ handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State) -> void()
-%% @end
-%%--------------------------------------------------------------------
--spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:debug("Terminating for reason: ~p, in state: ~p", [Reason, lager:pr(State, ?MODULE)]),
   ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
-%% @end
-%%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
-  Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
+
+%%%===================================================================
+%%% Internal types
+%%%===================================================================
+
+-type kv() :: #kv2{}.
+-type state() :: #state{}.
+-type nclock() :: #nclock{}.
 
 %%%===================================================================
 %%% Internal functions
@@ -274,7 +252,7 @@ init_db(Nodes) ->
   lists:foreach(fun create_table/1, TablesToCreate),
   case mnesia:wait_for_tables(Alltables, 60000) of
     ok ->
-      ok = maybe_upgrade_table(ExistingTables);
+      ok;
     {timeout, BadTables} ->
       lager:alert("Couldn't initialize mnesia tables: ~p", [BadTables]),
       init:stop(1);
@@ -294,41 +272,6 @@ get_record_info(kv2) ->
   record_info(fields, kv2);
 get_record_info(nclock) ->
   record_info(fields, nclock).
-
--spec(maybe_upgrade_table(tables()) -> ok|aborted).
-maybe_upgrade_table(ExistingTables) ->
-  case {lists:member(?KV_TABLE, ExistingTables), lists:member(?OLD_KV_TABLE, ExistingTables)} of
-    {true, _} ->
-        ok; %% already upgraded
-    {false, false} ->
-        ok; %% nothing to upgrade
-    {false, true} ->
-        upgrade_table(kv)
-  end.
-
--spec(upgrade_table(kv) -> ok|aborted).
-upgrade_table(kv) ->
-  F = fun() ->
-        LClock = mnesia:foldl(fun convert_and_write_record/2, ?INIT_LCLOCK, ?OLD_KV_TABLE),
-        NClock = #nclock{key = node(), lclock = LClock},
-        mnesia:write(NClock)
-      end,
-  case mnesia:sync_transaction(F) of
-    {atomic, _} ->
-      ok = mnesia:sync_log();
-    {aborted, Reason} ->
-      lager:error("Failed to upgrade kv table because ~p", [Reason]),
-      aborted
-  end.
-
-convert_and_write_record(Record0, Counter0) ->
-    Counter1 = Counter0 + 1,
-    Record1 = convert_record(Record0, Counter1),
-    mnesia:write(Record1),
-    Counter1.
-
-convert_record(_R = #kv{key = Key, vclock = VClock, map = Map}, Counter) ->
-  #kv2{key = Key, vclock = VClock, map = Map, lclock = Counter}.
 
 -spec(mk_write_fun(Key :: key(), OldVClock :: riak_dt_vclock:vclock() | undefined,
       Op :: riak_dt_map:map_op()) -> (fun())).
@@ -373,6 +316,7 @@ prepare_kv(Key, Map0, VClock0, Op) ->
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
     State :: state()) -> {Reply :: term(), State1 :: state()}.
 handle_op(Key, Op, OldVClock, State) ->
+  %% We really want to make sure this persists and we don't have backwards traveling clocks
   Fun = mk_write_fun(Key, OldVClock, Op),
   case mnesia:sync_transaction(Fun) of
     {atomic, NewKV} ->
@@ -384,10 +328,6 @@ handle_op(Key, Op, OldVClock, State) ->
     {aborted, Reason} ->
       {{error, Reason}, State}
   end.
-  %% We really want to make sure this persists and we don't have backwards traveling clocks
-
-
-
 
 %% TODO: Add metrics
 -spec(check_map(kv()) -> {error, Reason :: term()} | ok).
@@ -426,10 +366,6 @@ op_getkeys(MatchSpec) ->
   Keys = mnesia:dirty_all_keys(?KV_TABLE),
   MatchSpecCompiled = ets:match_spec_compile(MatchSpec),
   [Key || Key <- Keys, [true] == ets:match_spec_run([{Key}], MatchSpecCompiled)].
-
--spec(dirty_get_lclock(node()) -> lclock()).
-dirty_get_lclock(Key) ->
-  get_lclock(fun mnesia:dirty_read/2, Key).
 
 -spec(get_lclock(node()) -> lclock()).
 get_lclock(Key) ->
@@ -515,3 +451,22 @@ handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := Remot
 
 increment_lclock(N) ->
   N + 1.
+
+-spec(matchspec_kv2(ets:match_spec()) -> ets:match_spec()).
+matchspec_kv2({{Key}, Conditions, [true]}) ->
+  Match = #kv2{key = Key, map = '_', vclock = '_', lclock = '_'},
+  {Match, Conditions, ['$_']};
+matchspec_kv2(MatchSpec) ->
+  lists:map(fun matchspec_kv2/1, MatchSpec).
+
+-spec(kv2map(kv()) -> kv2map()).
+kv2map(#kv2{key = Key, map = Map}) ->
+  #{key => Key, value => riak_dt_map:value(Map)}.
+
+-spec(kv2map(kv(), [kv()]) -> kv2map()).
+kv2map(New, []) ->
+  kv2map(New);
+kv2map(New, [Old | _]) ->
+  Map = kv2map(New),
+  #{value := OldValue} = kv2map(Old),
+  Map#{old_value => OldValue}.

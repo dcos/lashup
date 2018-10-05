@@ -1,15 +1,12 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2015, <COMPANY>
-%%% @doc
-%%%
-%%% @end
-%%% Created : 28. Dec 2015 10:57 AM
-%%%-------------------------------------------------------------------
 -module(lashup_hyparview_membership).
 -author("sdhillon").
-
 -behaviour(gen_server).
+
+-include("lashup.hrl").
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %% API
 -export([
@@ -24,23 +21,13 @@
 ]).
 
 %% gen_server callbacks
--export([init/1,
-  handle_call/3,
-  handle_cast/2,
-  handle_info/2,
-  terminate/2,
-  code_change/3]).
+-export([init/1, handle_call/3, handle_cast/2,
+  handle_info/2, terminate/2, code_change/3]).
 
--include("lashup.hrl").
-
--ifdef(TEST).
--include_lib("eunit/include/eunit.hrl").
--endif.
-
--define(SERVER, ?MODULE).
-
--record(monitor, {monitor_ref :: reference(), node :: node()}).
-
+-record(monitor, {
+    monitor_ref :: reference(),
+    node :: node()
+}).
 -type monitor() :: #monitor{}.
 
 -record(state, {
@@ -87,59 +74,39 @@
 %% The recognize ping function tells the hyparview membership server that
 %% this node has us in their active view
 recognize_pong(Pong) ->
-  gen_server:cast(?SERVER, {recognize_pong, Pong}).
+  gen_server:cast(?MODULE, {recognize_pong, Pong}).
 
 %% This is a way for lashup_gm_probe to recommend a neighbor
 %% if it finds a neighbor that's outside of our reachability graph
 recommend_neighbor(Node) ->
-  gen_server:cast(?SERVER, {recommend_neighbor, Node}).
+  gen_server:cast(?MODULE, {recommend_neighbor, Node}).
 
 %% Pings the node immediately.
 do_probe(Node) ->
-  gen_server:cast(?SERVER, {do_probe, Node}).
+  gen_server:cast(?MODULE, {do_probe, Node}).
 
 ping_failed(Node) ->
-  gen_server:cast(?SERVER, {ping_failed, Node}).
+  gen_server:cast(?MODULE, {ping_failed, Node}).
 
 get_active_view() ->
-  gen_server:call(?SERVER, get_active_view).
+  gen_server:call(?MODULE, get_active_view).
 
 get_passive_view() ->
-  gen_server:call(?SERVER, get_passive_view).
+  gen_server:call(?MODULE, get_passive_view).
 
 -spec update_masters([node()]) -> ok.
 update_masters(Nodes) ->
-  gen_server:call(?SERVER, {update_masters, Nodes}).
+  gen_server:call(?MODULE, {update_masters, Nodes}).
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%%
-%% @end
-%%--------------------------------------------------------------------
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
 start_link() ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+  gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%%
-%% @spec init(Args) -> {ok, State} |
-%%                     {ok, State, Timeout} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
--spec(init(Args :: term()) ->
-  {ok, State :: state()} | {ok, State :: state(), timeout() | hibernate} |
-  {stop, Reason :: term()} | ignore).
 init([]) ->
   rand:seed(exsplus),
   %% This seed is a fixed seed used for shuffling the list
@@ -156,21 +123,6 @@ init([]) ->
     fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window},
   {ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_call(Request :: term(), From :: {pid(), Tag :: term()},
-  State :: state()) ->
-  {reply, Reply :: term(), NewState :: state()} |
-  {reply, Reply :: term(), NewState :: state(), timeout() | hibernate} |
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), Reply :: term(), NewState :: state()} |
-  {stop, Reason :: term(), NewState :: state()}).
 handle_call(stop, _From, State) ->
   {stop, normal, State};
 handle_call({update_masters, Nodes}, _From, State = #state{extra_masters = ExtraMasters}) ->
@@ -193,20 +145,8 @@ handle_call(get_passive_view, _From, State = #state{passive_view = PassiveView})
 handle_call(try_shuffle, _From, State) ->
   NewDelay = try_shuffle(State),
   {reply, NewDelay, State}.
-
 %% No handler here, because no one should ever call us off-node, and it's indicative of a bug
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%%
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_cast(Request :: term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 %% We generated a timer (with a ref) when we did the join with a timeout
 %% We get passed back that ref, and now we need to delete it
 handle_cast({do_probe, Node}, State) ->
@@ -229,20 +169,6 @@ handle_cast(Request, State) ->
   lager:debug("Received unknown cast: ~p", [Request]),
   {noreply, check_state(State)}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%%
-%% @spec handle_info(Info, State) -> {noreply, State} |
-%%                                   {noreply, State, Timeout} |
-%%                                   {stop, Reason, State}
-%% @end
-%%--------------------------------------------------------------------
--spec(handle_info(Info :: timeout() | term(), State :: state()) ->
-  {noreply, NewState :: state()} |
-  {noreply, NewState :: state(), timeout() | hibernate} |
-  {stop, Reason :: term(), NewState :: state()}).
 %% It's likely just that someone connected to us, and that's okay
 handle_info(DownMessage = {'DOWN', _, _, _, _}, State) ->
   State1 = handle_down_message(DownMessage, State),
@@ -289,34 +215,10 @@ handle_info(Info, State) ->
   lager:debug("Received unknown info: ~p", [Info]),
   {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State) -> void()
-%% @end
-%%--------------------------------------------------------------------
--spec(terminate(Reason :: (normal | shutdown | {shutdown, term()} | term()),
-  State :: state()) -> term()).
 terminate(Reason, State) ->
   lager:error("Terminating with reason ~p, and state: ~p", [Reason, State]),
   ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, State, Extra) -> {ok, NewState}
-%% @end
-%%--------------------------------------------------------------------
--spec(code_change(OldVsn :: term() | {down, term()}, State :: state(),
-  Extra :: term()) ->
-  {ok, NewState :: state()} | {error, Reason :: term()}).
 code_change(_OldVsn, State, _Extra) ->
   {ok, State}.
 
@@ -383,7 +285,6 @@ reschedule_join(BaseTime) ->
 
 %%% Rescheduling functions
 
-
 choose_node(Nodes) when length(Nodes) > 0 ->
   Length = erlang:length(Nodes),
   NodeIdx = rand:uniform(Length),
@@ -436,21 +337,16 @@ ping_with_timeout(Node, Timeout) ->
     maybe_pong
   end.
 
-
-
 -spec(join(node()) -> ok).
 join(Node) ->
   {ok, Ref} = timer:send_after(1000, join_failed),
-  gen_server:cast({?SERVER, Node}, #{message => join, sender => node(), ref => Ref}).
-
+  gen_server:cast({?MODULE, Node}, #{message => join, sender => node(), ref => Ref}).
 
 %% This is ridiculously inefficient on the order of O(N!),
 %% but I'm prototyping
 %% And this input shouldn't get much bigger than 30.
 
-
 -spec(trim_ordset_to(ordsets:ordset(), non_neg_integer()) -> {ordsets:ordset(), ordsets:ordset()}).
-
 trim_ordset_to(Ordset, Size) when Size > 0 ->
   trim_ordset_to(Ordset, Size, []).
 
@@ -462,7 +358,6 @@ trim_ordset_to(Ordset, Size, DroppedItems) when length(Ordset) > Size ->
   trim_ordset_to(Ordset1, Size, DroppedItems1);
 trim_ordset_to(Ordset, _Size, DroppedItems) ->
   {Ordset, DroppedItems}.
-
 
 -spec(handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveView, active_view_size = AVS}, Ref)
@@ -490,19 +385,18 @@ handle_join(_, State, _) -> State.
 -spec(deny_join(State :: state(), Node :: node(), Ref :: reference()) -> ok).
 deny_join(_State = #state{active_view = ActiveView}, Node, Ref) ->
   Reply = #{message => join_deny, sender => node(), ref => Ref, active_view => ActiveView},
-  gen_server:cast({?SERVER, Node}, Reply).
+  gen_server:cast({?MODULE, Node}, Reply).
 
-
-  -spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
+-spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
   case try_add_node_to_active_view(Node, State) of
     {ok, NewState = #state{active_view = ActiveView, passive_view = PassiveView}} ->
       ARWL = lashup_config:arwl(),
       Fanout = ordsets:del_element(Node, ActiveView),
       ForwardJoinMessage = #{message => forward_join, node => Node, ttl => ARWL, sender => node(), seen => [node()]},
-      gen_server:abcast(Fanout, ?SERVER, ForwardJoinMessage),
+      gen_server:abcast(Fanout, ?MODULE, ForwardJoinMessage),
       Reply = #{message => join_success, sender => node(), ref => Ref, passive_view => PassiveView},
-      gen_server:cast({?SERVER, Node}, Reply),
+      gen_server:cast({?MODULE, Node}, Reply),
       JoinWindow1 = lashup_utils:add_tick(JoinWindow),
       NewState#state{join_window = JoinWindow1};
     {error, NewState} ->
@@ -632,8 +526,7 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}
 forward_forward_join1(ForwardJoin, Nodes) when is_list(Nodes) ->
   Idx = rand:uniform(length(Nodes)),
   TargetNode = lists:nth(Idx, Nodes),
-  gen_server:cast({?SERVER, TargetNode}, ForwardJoin).
-
+  gen_server:cast({?MODULE, TargetNode}, ForwardJoin).
 
 %% TODO:
 %% Maybe we should disconnect from the node at this point?
@@ -650,7 +543,6 @@ handle_disconnect(_Disconnect = #{sender := Sender},
   schedule_disconnect(Sender),
   State#state{active_view = ActiveView1, passive_view = PassiveView1, monitors = Monitors1}.
 
-
 handle_down_message(_DownMessage = {'DOWN', MonitorRef, process, _Info, Reason},
     State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
   case monitor_ref_to_node(MonitorRef, Monitors) of
@@ -663,7 +555,6 @@ handle_down_message(_DownMessage = {'DOWN', MonitorRef, process, _Info, Reason},
       PassiveView1 = ordsets:add_element(Node, PassiveView),
       State#state{active_view = ActiveView1, passive_view = PassiveView1, monitors = Monitors1}
   end.
-
 
 %% Maybe neighbor should only be called if we have a non-full active view
 %% We filter for a full active view in the handle_info callback.
@@ -735,7 +626,7 @@ send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(Passiv
 send_neighbor_to(Timeout, Node, Priority) when is_integer(Timeout) ->
   lager:debug("Sending neighbor to: ~p", [Node]),
   Ref = timer:send_after(Timeout * 3, {tried_neighbor, Node}),
-  gen_server:cast({?SERVER, Node}, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
+  gen_server:cast({?MODULE, Node}, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
 
 -spec(handle_neighbor(neighbor(), state()) -> state()).
 handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
@@ -744,7 +635,7 @@ handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
   %% The Active neighbor list is full
   lager:info("Denied neighbor request from ~p because active view full", [Sender]),
   PassiveView = State#state.passive_view,
-  gen_server:cast({?SERVER, Sender},
+  gen_server:cast({?MODULE, Sender},
     #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView}),
   State;
 
@@ -753,12 +644,12 @@ handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
 handle_neighbor(_Neighbor = #{sender := Sender, ref := Ref}, State) ->
   case try_add_node_to_active_view(Sender, State) of
     {ok, NewState} ->
-      gen_server:cast({?SERVER, Sender}, #{message => neighbor_accept, sender => node(), ref => Ref}),
+      gen_server:cast({?MODULE, Sender}, #{message => neighbor_accept, sender => node(), ref => Ref}),
       NewState;
     {error, NewState = #state{passive_view = PassiveView}} ->
       lager:warning("Failed to add neighbor ~p to active view on neighbor message", [Sender]),
       NeighborDeny = #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView},
-      gen_server:cast({?SERVER, Sender}, NeighborDeny),
+      gen_server:cast({?MODULE, Sender}, NeighborDeny),
       NewState
   end.
 
@@ -800,8 +691,6 @@ handle_recommend_neighbor(Node, _State) ->
   ok.
 
 %%%%%%%%%% End Neighbor management
-
-
 
 %% Check State function is mostly there during testing
 %% We should rip it out / disable it in prod
@@ -873,7 +762,6 @@ contact_nodes(ExtraMasters) ->
   ordsets:del_element(node(), AllMasters).
 
 
-
 -spec(handle_shuffle(Shuffle :: shuffle(), state()) -> state()).
 handle_shuffle(Shuffle = #{ttl := 0}, State) ->
   State1 = do_shuffle(Shuffle, State),
@@ -892,7 +780,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
     Else ->
       NewShuffle = Shuffle#{sender := node(), ttl := TTL - 1},
       NextNode = choose_node(Else),
-      gen_server:cast({?SERVER, NextNode}, NewShuffle),
+      gen_server:cast({?MODULE, NextNode}, NewShuffle),
       State
   end.
 do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemotePassiveView, node := Node},
@@ -900,7 +788,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
   ReplyNodes1 = ordsets:subtract(MyPassiveView, RemoteActiveView),
   ReplyNodes2 = ordsets:subtract(ReplyNodes1, RemotePassiveView),
   ShuffleReply = #{message => shuffle_reply, node => node(), combined_view => ReplyNodes2},
-  gen_server:cast({?SERVER, Node}, ShuffleReply),
+  gen_server:cast({?MODULE, Node}, ShuffleReply),
   schedule_disconnect(Node),
 
   LargeCombinedView = ordsets:union([MyPassiveView, RemoteActiveView, RemotePassiveView]),
@@ -927,7 +815,7 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
     ttl => 5
   },
   Node = choose_node(ActiveView),
-  gen_server:cast({?SERVER, Node}, Shuffle),
+  gen_server:cast({?MODULE, Node}, Shuffle),
   case length(PassiveView) of
     Size when Size < 0.5 * PVS ->
       5000;
@@ -949,7 +837,7 @@ handle_shuffle_reply(_ShuffleReply = #{combined_view := CombinedView},
 ensure_monitor(Node, Monitors) ->
   case has_monitor(Node, Monitors) of
     false ->
-      MonitorRef = monitor(process, {?SERVER, Node}),
+      MonitorRef = monitor(process, {?MODULE, Node}),
       true = is_reference(MonitorRef),
       Monitor = #monitor{node = Node, monitor_ref = MonitorRef},
       lists:keystore(Node, #monitor.node, Monitors, Monitor);
@@ -996,7 +884,7 @@ push_state(#state{passive_view = PV, active_view = AV}) ->
 
 shuffle_backoff_loop(Delay, Pid) ->
   timer:sleep(Delay),
-  case catch gen_server:call(?SERVER, try_shuffle) of
+  case catch gen_server:call(?MODULE, try_shuffle) of
     Backoff when is_integer(Backoff) ->
       shuffle_backoff_loop(Backoff, Pid);
     _ ->
@@ -1061,7 +949,7 @@ disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveVi
       DisconnectMessage = #{message => disconnect, sender => node()},
       case lists:member(Node, nodes()) of
         true ->
-          gen_server:cast({?SERVER, Node}, DisconnectMessage);
+          gen_server:cast({?MODULE, Node}, DisconnectMessage);
         false ->
           ok
       end,
@@ -1072,9 +960,6 @@ disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveVi
     false ->
       State
   end.
-
-
-
 
 handle_maybe_disconnect(Node, State) ->
   handle_maybe_disconnect1(Node, State).
@@ -1132,7 +1017,3 @@ trim_test() ->
   {Ordset1, _} = trim_ordset_to(Ordset, 3),
   ?assertEqual(3, length(Ordset1)).
 -endif.
-
-
-
-

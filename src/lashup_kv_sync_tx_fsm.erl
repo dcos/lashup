@@ -11,7 +11,6 @@
 %% Internal APIs
 -export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
--include("lashup_kv.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -record(state, {node, monitor_ref, remote_pid, lclock, maxclock}).
@@ -39,7 +38,7 @@ init(timeout, init, [Node]) ->
         {error, Reason} ->
             {stop, {other_error, Reason}};
         {ok, RemoteChildPid} ->
-            LClock = lashup_kv:dirty_get_lclock(Node),
+            LClock = lashup_kv:read_lclock(Node),
             MonitorRef = monitor(process, RemoteChildPid),
             StateData = #state{node = Node, monitor_ref = MonitorRef,
                 remote_pid = RemoteChildPid, lclock = LClock, maxclock = LClock},
@@ -50,24 +49,22 @@ tx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{m
     handle_disconnect(Disconnect);
 
 tx_sync({call, From}, {request_key, Key}, _) ->
-    [#kv2{key = Key, vclock = VClock, map = Map}] = mnesia:dirty_read(?KV_TABLE, Key),
-    gen_statem:reply(From, #{vclock => VClock, value => Map}),
+    #{key := Key, vclock := VClock, value := Value} = lashup_kv:raw_value(Key),
+    gen_statem:reply(From, #{vclock => VClock, value => Value}),
     keep_state_and_data;
 
 tx_sync(info, #{from := RemotePID, message := rx_sync_complete},
   StateData = #state{node = Node, remote_pid = RemotePID, maxclock = MaxClock}) ->
-    NClock = #nclock{key = Node, lclock = MaxClock},
-    case mnesia:sync_transaction(fun() -> mnesia:write(NClock) end)  of
-        {atomic, _} ->
+    case lashup_kv:write_lclock(Node, MaxClock)  of
+        ok ->
             {next_state, idle, StateData, [{next_event, internal, reschedule_sync}]};
-        {aborted, Reason} ->
-            lager:error("Couldn't write to nclock table because ~p", [Reason]),
+        {error, Reason} ->
             {stop, Reason}
     end;
 
 tx_sync(internal, start_sync, StateData = #state{maxclock = MaxClock}) ->
     LClock = MaxClock,
-    NextKey = maybe_fetch_next_key(mnesia:dirty_first(?KV_TABLE), LClock),
+    NextKey = maybe_fetch_next_key(lashup_kv:first_key(), LClock),
     defer_sync_key(NextKey),
     {keep_state, StateData#state{lclock = LClock}};
 
@@ -77,7 +74,7 @@ tx_sync(cast, {sync, '$end_of_table'}, #state{remote_pid = RemotePID}) ->
 
 tx_sync(cast, {sync, Key}, StateData = #state{remote_pid = RemotePID, lclock = LClock, maxclock = MaxClock0}) ->
     KeyClock = send_key_vclock(Key, RemotePID),
-    NextKey = maybe_fetch_next_key(mnesia:dirty_next(?KV_TABLE, Key), LClock),
+    NextKey = maybe_fetch_next_key(lashup_kv:next_key(Key), LClock),
     defer_sync_key(NextKey),
     MaxClock1 = erlang:max(KeyClock, MaxClock0),
     {keep_state, StateData#state{maxclock = MaxClock1}}.
@@ -109,7 +106,7 @@ finish_sync(RemotePID) ->
     erlang:send(RemotePID, Message, [noconnect]).
 
 send_key_vclock(Key, RemotePID) ->
-    [#kv2{vclock = VClock, lclock = KeyClock}] = mnesia:dirty_read(?KV_TABLE, Key),
+    #{vclock := VClock, lclock := KeyClock} = lashup_kv:raw_value(Key),
     Message = #{from => self(), key => Key, vclock => VClock, message => keydata},
     erlang:send(RemotePID, Message, [noconnect]),
     KeyClock.
@@ -121,13 +118,13 @@ defer_sync_key(Key) ->
 maybe_fetch_next_key(Key, _) when Key == '$end_of_table' ->
     Key;
 maybe_fetch_next_key(Key, LClock) ->
-    [#kv2{lclock = KeyClock}] = mnesia:dirty_read(?KV_TABLE, Key),
+    #{lclock := KeyClock} = lashup_kv:raw_value(Key),
     maybe_fetch_next_key(Key, KeyClock, LClock).
 
 maybe_fetch_next_key(Key, KeyClock, LClock) when KeyClock >= LClock ->
     Key;
 maybe_fetch_next_key(Key, _, LClock) ->
-    NextKey = mnesia:dirty_next(?KV_TABLE, Key),
+    NextKey = lashup_kv:next_key(Key),
     maybe_fetch_next_key(NextKey, LClock).
 
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->

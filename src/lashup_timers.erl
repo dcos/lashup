@@ -1,45 +1,61 @@
-%%%-------------------------------------------------------------------
-%%% @author sdhillon
-%%% @copyright (C) 2016, <COMPANY>
-%%% @doc
-%%% A nice little library to setup dynamic timers that are
-%%% @end
-%%% Created : 09. Feb 2016 7:15 AM
-%%%-------------------------------------------------------------------
+%%% @doc A nice little library to setup dynamic timers that are
+
 -module(lashup_timers).
 -author("sdhillon").
-
--export([wakeup_loop/2, loop_calculate_time/1, linear_ramp_up/2, wait/2, jitter_uniform/2, jitter_uniform/1,
-  time_remaining/1, cancel/1, limit_count/2, reset/1, skip/1]).
-
 
 -ifdef(TEST).
 -include_lib("proper/include/proper.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -endif.
 
--record(wakeup_loop, {count, message, resolver, pid, ref}).
--record(report_time, {ref, from}).
--record(report_time_reply, {ref, ms}).
+-export([
+  wakeup_loop/2,
+  loop_calculate_time/1,
+  linear_ramp_up/2,
+  wait/2,
+  jitter_uniform/2,
+  jitter_uniform/1,
+  time_remaining/1,
+  cancel/1,
+  limit_count/2,
+  reset/1,
+  skip/1
+]).
 
+-export_type([lashup_timer/0, timer_resolver/0]).
+
+-record(wakeup_loop, {
+  count,
+  message,
+  resolver,
+  pid,
+  ref
+}).
+-record(report_time, {
+  ref,
+  from
+}).
+-record(report_time_reply, {
+  ref,
+  ms
+}).
 
 -record(lashup_timer, {
   pid :: pid(),
   ref :: reference()
 }).
-
 -type lashup_timer() :: #lashup_timer{}.
--type timer_resolver() :: integer() | fun(() -> integer()) |fun(((Count :: pos_integer())) -> integer()).
--export_type([lashup_timer/0]).
+
+-type timer_resolver() :: integer() |
+                          fun (() -> integer()) |
+                          fun ((Count :: pos_integer()) -> integer()).
 
 
 reset(#lashup_timer{pid = Pid}) ->
   reset ! Pid.
 
-
 skip(#lashup_timer{pid = Pid}) ->
   skip ! Pid.
-
 
 cancel(#lashup_timer{pid = Pid}) ->
   Pid ! cancel.
@@ -56,7 +72,6 @@ time_remaining(#lashup_timer{pid = Pid}) ->
   end.
 
 %% @doc Dynamic Timers!
-%%
 
 -spec(wakeup_loop(Message :: term(), TimerResolver :: timer_resolver()) -> lashup_timer()).
 wakeup_loop(Message, TimeResolver) ->
@@ -64,7 +79,6 @@ wakeup_loop(Message, TimeResolver) ->
   State = #wakeup_loop{count = 1, message = Message, resolver = TimeResolver, pid = self(), ref = Ref},
   Pid = spawn_link(?MODULE, loop_calculate_time, [State]),
   #lashup_timer{pid = Pid, ref = Ref}.
-
 
 loop_calculate_time(State = #wakeup_loop{count = Count, resolver = TimeResolver}) ->
   SleepTime = (to_function_with_arity(1, TimeResolver))(Count),
@@ -106,7 +120,6 @@ limit_count(MaxCount, TimerResolver) ->
     (Count) ->
       (to_function_with_arity(1, TimerResolver))(Count)
   end.
-
 
 % @doc It makes the clock go faster until RampupPeriods counts have gone by
 linear_ramp_up(RampupPeriod, TimerResolver) ->
@@ -161,7 +174,6 @@ to_function_with_arity(1, Function) when is_function(Function, 0) ->
     Function()
   end.
 
-
 -ifdef(TEST).
 
 proper_test() ->
@@ -182,14 +194,12 @@ resolver() ->
     {wait, [pos_integer()]}
   ]).
 
-
 evaluate([], Last) ->
   Last;
 evaluate([{F, A}|Resolvers], Value) ->
 
   New = apply(?MODULE, F, A ++ [Value]),
   evaluate(Resolvers, New).
-
 
 resolvers_work() ->
   ?FORALL(Config, resolver_and_initial_value(),
@@ -198,7 +208,6 @@ resolvers_work() ->
       Result = (evaluate(Resolvers, InitialValue))(Count),
       is_number(Result) andalso Result >= 0
     end).
-
 
 flush(Ref) ->
   flush(0, Ref).
@@ -217,7 +226,6 @@ report_time_test() ->
   {ok, TimeLeft} = time_remaining(Timer),
   ?assert(TimeLeft =< 10000 andalso TimeLeft >= 0).
 
-
 cancel_timer_test() ->
   Ref = make_ref(),
   Timer = lashup_timers:wakeup_loop(Ref, 100),
@@ -231,7 +239,5 @@ limit_test() ->
       lashup_timers:limit_count(5,
         10)),
   ?assertEqual(5, flush(Ref)).
-
-
 
 -endif.
