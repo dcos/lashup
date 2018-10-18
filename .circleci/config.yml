@@ -1,37 +1,11 @@
 version: 2
 jobs:
   build:
-    machine: true
     working_directory: '~/lashup'
-    environment:
-      - OTP_VERSION: "21.1"
+    docker:
+      - image: erlang:21.1
     steps:
       - checkout
-      - restore_cache:
-          key: otp-build-21.1
-      - run:
-          name: Building OTP
-          command: |
-              if [ -d ~/src/otp ]; then
-                  echo "Use pre-build OTP version"
-                  exit 0
-              fi
-
-              set -xe
-              ( mkdir -p ~/src && cd ~/src \
-                && git clone --branch maint-21 https://github.com/erlang/otp.git )
-              ( cd ~/src/otp \
-                && git checkout 377f19f25aeec6939a6728bd0c4910086c22ccdc \
-                && ./otp_build autoconf \
-                && ./configure \
-                && make -j$(getconf _NPROCESSORS_ONLN) )
-      - save_cache:
-          key: otp-build-21.1
-          paths:
-            - ~/src/otp
-      - run:
-          name: Installing OTP
-          command: (cd ~/src/otp && sudo make install)
       - run:
           name: Updating rebar3
           command: ./rebar3 update
@@ -63,8 +37,13 @@ jobs:
           name: Generating cover report
           command: ./rebar3 as test covertool generate
       - run:
+          name: Installing python
+          command: |
+              apt-get update
+              apt-get install -y --no-install-recommends python3-pip
+      - run:
           name: Installing codecov
-          command: pip install codecov
+          command: pip3 install codecov
       - run:
           name: Sending cover report
           command: |
