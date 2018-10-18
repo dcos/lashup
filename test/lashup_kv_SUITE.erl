@@ -46,21 +46,39 @@ end_per_testcase(_, Config) ->
 
 fetch_keys(_Config) ->
     Key1 = [a,b,c],
-    {ok, _} = lashup_kv:request_op(Key1, 
-                  {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+    {ok, _} = lashup_kv:request_op(Key1, {update, 
+                  [{update, 
+                      {flag, riak_dt_lwwreg}, 
+                      {assign, true, erlang:system_time(nano_seconds)}
+                  }]
+              }),
     Key2 = [a,b,d],
-    {ok, _} = lashup_kv:request_op(Key2,
-                  {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+    {ok, _} = lashup_kv:request_op(Key2, {update, 
+                  [{update, 
+                      {flag, riak_dt_lwwreg}, 
+                      {assign, true, erlang:system_time(nano_seconds)}
+                  }]
+              }),
     Key3 = [x,y,z],
-    {ok, _} = lashup_kv:request_op(Key3,
-                  {update, [{update, {flag, riak_dt_lwwreg}, {assign, true, erlang:system_time(nano_seconds)}}]}),
+    {ok, _} = lashup_kv:request_op(Key3, {update, 
+                  [{update, 
+                      {flag, riak_dt_lwwreg},
+                      {assign, true, erlang:system_time(nano_seconds)}
+                  }]
+              }),
     Keys = lashup_kv:keys(ets:fun2ms(fun({[a, b, '_']}) -> true end)),
-    true = lists:member(Key1, Keys) and lists:member(Key2, Keys) and not lists:member(Key3, Keys),
+    true = lists:member(Key1, Keys) and
+           lists:member(Key2, Keys) and
+           not lists:member(Key3, Keys),
     ok.
 
 kv_subscribe(_Config) ->
-    {ok, _} = lashup_kv:request_op(flag,
-                  {update, [{update, {color, riak_dt_lwwreg}, {assign, red, erlang:system_time(nano_seconds)}}]}),
+    {ok, _} = lashup_kv:request_op(flag, {update, 
+                  [{update, 
+                      {color, riak_dt_lwwreg}, 
+                      {assign, red, erlang:system_time(nano_seconds)}
+                  }]
+              }),
     {ok, Ref} = lashup_kv_events_helper:start_link(ets:fun2ms(fun({flag}) -> true end)),
     receive
         {lashup_kv_events, #{type := ingest_new, ref := Ref}} ->
@@ -68,8 +86,12 @@ kv_subscribe(_Config) ->
     after 5000 ->
         ct:fail("Nothing received")
     end,
-    {ok, _} = lashup_kv:request_op(flag,
-                  {update, [{update, {color, riak_dt_lwwreg}, {assign, blue, erlang:system_time(nano_seconds)}}]}),
+    {ok, _} = lashup_kv:request_op(flag, {update, 
+                  [{update, 
+                      {color, riak_dt_lwwreg}, 
+                      {assign, blue, erlang:system_time(nano_seconds)}
+                  }]
+              }),
     receive
         {lashup_kv_events, #{type := ingest_update, ref := Ref, value := Value, old_value := OldValue}} ->
             case {Value, OldValue} of
