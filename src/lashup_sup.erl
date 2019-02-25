@@ -10,6 +10,9 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    lashup_kv_sync_rx_fsm:init_metrics(),
+    lashup_kv_sync_tx_fsm:init_metrics(),
+
     {ok, {#{strategy => rest_for_one}, [
         ?CHILD(lashup_core_sup, supervisor),
         ?CHILD(lashup_platform_sup, supervisor)
