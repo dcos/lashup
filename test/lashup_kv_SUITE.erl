@@ -42,6 +42,7 @@ init_per_testcase(_, Config) ->
 
 end_per_testcase(_, Config) ->
     application:stop(lashup),
+    application:stop(prometheus),
     Config.
 
 fetch_keys(_Config) ->

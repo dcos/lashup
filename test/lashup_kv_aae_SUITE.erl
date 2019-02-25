@@ -27,6 +27,7 @@ init_per_suite(Config) ->
 
 end_per_suite(Config) ->
     application:stop(lashup),
+    application:stop(prometheus),
     net_kernel:stop(),
     Config.
 
