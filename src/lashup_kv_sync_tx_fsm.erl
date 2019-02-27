@@ -140,9 +140,9 @@ send(RemotePID, Message) ->
     try
         erlang:send(RemotePID, Message, [noconnect])
     after
-        prometheus_summary:observe(
-            lashup, aae_tx_bytes, [],
-            erlang:external_size(Message))
+        Size = erlang:external_size(Message),
+        prometheus_counter:inc(lashup, aae_tx_messages_total, [], 1),
+        prometheus_counter:inc(lashup, aae_tx_bytes_total, [], Size)
     end.
 
 %%%===================================================================
@@ -151,8 +151,13 @@ send(RemotePID, Message) ->
 
 -spec(init_metrics() -> ok).
 init_metrics() ->
-    prometheus_summary:new([
+    prometheus_counter:new([
         {registry, lashup},
-        {name, aae_tx_bytes},
-        {help, "The size of AAE TX messages sent by node in bytes."}
+        {name, aae_tx_bytes_total},
+        {help, "Total number of AAE TX bytes sent by node."}
+    ]),
+    prometheus_counter:new([
+        {registry, lashup},
+        {name, aae_tx_messages_total},
+        {help, "Total number of AAE TX messages sent by node."}
     ]).

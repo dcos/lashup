@@ -10,6 +10,7 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    lashup_kv:init_metrics(),
     lashup_kv_sync_rx_fsm:init_metrics(),
     lashup_kv_sync_tx_fsm:init_metrics(),
 
