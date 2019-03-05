@@ -5,7 +5,8 @@
 %% API
 -export([
   start_link/0,
-  multicast/2
+  multicast/2,
+  init_metrics/0
 ]).
 
 %% Packet API
@@ -100,6 +101,17 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+-spec(handle_do_original_multicast(topic(), payload()) -> ok).
+handle_do_original_multicast(Topic, Payload) ->
+  Begin = erlang:monotonic_time(),
+  try
+    original_multicast(Topic, Payload)
+  after
+    prometheus_summary:observe(
+      lashup, mc_do_multicast_seconds, [],
+      erlang:monotonic_time() - Begin)
+  end.
+
 %% TODO:
 %%  -Buffer messages if my neighbors / active view are flapping too much
 %%  -Experiment with adding the tree that I build to the messages.
@@ -107,8 +119,8 @@ code_change(_OldVsn, State, _Extra) ->
 %%   The tree representation could also be significantly reduced in size rather than the map
 %%   Which has a bunch of extraneous metadata
 
--spec(handle_do_original_multicast(topic(), payload()) -> ok).
-handle_do_original_multicast(Topic, Payload) ->
+-spec(original_multicast(topic(), payload()) -> ok).
+original_multicast(Topic, Payload) ->
   Packet = new_multicast_packet(Topic, Payload),
   ActiveView = lashup_hyparview_membership:get_active_view(),
   Fanout = lashup_config:max_mc_replication(),
@@ -154,10 +166,13 @@ do_original_cast(Node, Packet) ->
       _ ->
         Packet0
     end,
-  gen_server:cast({?MODULE, Node}, Packet1).
+  bsend(Packet1, [Node]).
 
 -spec(handle_multicast_packet(multicast_packet()) -> ok).
 handle_multicast_packet(MulticastPacket) ->
+  Size = erlang:external_size(MulticastPacket),
+  prometheus_counter:inc(lashup, mc_receive_messages_total, [], 1),
+  prometheus_counter:inc(lashup, mc_receive_bytes_total, [], Size),
   % 1. Process the packet, and forward it on
   maybe_forward_packet(MulticastPacket),
   % 2. Fan it out to lashup_gm_mc_events
@@ -194,10 +209,51 @@ forward_packet(MulticastPacket, Tree) ->
 
 bsend(MulticastPacket, Children) ->
   lists:foreach(fun (Child) ->
-    case erlang:send({?MODULE, Child}, MulticastPacket, [noconnect]) of
+    Begin = erlang:monotonic_time(),
+    try erlang:send({?MODULE, Child}, MulticastPacket, [noconnect]) of
       noconnect ->
         lager:warning("Dropping packet due to stale tree");
       _Result ->
-        ok
+        prometheus_counter:inc(
+          lashup, mc_send_bytes_total, [],
+          erlang:external_size(MulticastPacket))
+    after
+      prometheus_summary:observe(
+        lashup, mc_send_packets_seconds, [],
+        erlang:monotonic_time() - Begin)
     end
   end, Children).
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, mc_do_multicast_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent processing multicast packets."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, mc_send_packets_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent sending multicast packets."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, mc_send_bytes_total},
+    {help, "Total number of multicast packets sent in bytes."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, mc_receive_bytes_total},
+    {help, "Total number of bytes multicast packets received in bytes."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, mc_receive_messages_total},
+    {help, "Total number of bytes multicast packets received."}
+  ]).
