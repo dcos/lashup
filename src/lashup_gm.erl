@@ -9,12 +9,9 @@
 %% API
 -export([
   start_link/0,
-  get_subscriptions/0,
-  gm/0,
+  init_metrics/0,
   get_neighbor_recommendations/1,
-  lookup_node/1,
-  id/0,
-  id/1
+  gm/0
 ]).
 
 %% gen_server callbacks
@@ -40,7 +37,6 @@
   subscribers = [],
   hyparview_event_ref :: reference()
 }).
-
 -type state() :: #state{}.
 
 %% @doc
@@ -53,27 +49,8 @@
 get_neighbor_recommendations(ActiveViewSize) ->
   gen_server:call(?MODULE, {get_neighbor_recommendations, ActiveViewSize}, 500).
 
-%% @doc Looks up a node in ets
-lookup_node(Node) ->
-  case ets:lookup(members, Node) of
-    [] ->
-      error;
-    [Member] ->
-      {ok, Member}
-  end.
-
 gm() ->
   get_membership().
-
-get_subscriptions() ->
-  gen_server:call(?MODULE, get_subscriptions).
-
-id() ->
-  node().
-
-id(Node) ->
-  Node.
-
 
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
@@ -101,8 +78,6 @@ handle_call(gm, _From, State) ->
 handle_call({subscribe, Pid}, _From, State) ->
   {Reply, State1} = handle_subscribe(Pid, State),
   {reply, Reply, State1};
-handle_call(get_subscriptions, _From, State = #state{subscriptions = Subscriptions}) ->
-  {reply, Subscriptions, State};
 handle_call(update_node, _From, State) ->
   State1 = update_node(timed_refresh, State),
   {reply, 300000, State1};
@@ -187,8 +162,9 @@ new_epoch() ->
 handle_subscribe(Pid, State = #state{subscribers = Subscribers}) ->
   MonitorRef = monitor(process, Pid),
   Subscriber = #subscriber{node = node(Pid), monitor_ref = MonitorRef, pid = Pid},
-  State1 = State#state{subscribers = [Subscriber | Subscribers]},
-  {{ok, self()}, State1}.
+  Subscribers1 = [Subscriber | Subscribers],
+  prometheus_gauge:set(lashup, gm_subscribers, [], length(Subscribers1)),
+  {{ok, self()}, State#state{subscribers = Subscribers1}}.
 
 handle_current_views(ActiveView, State = #state{subscriptions = Subscriptions}) ->
   Subscriptions1 = lists:foldl(fun check_member/2, Subscriptions, ActiveView),
@@ -199,6 +175,7 @@ handle_current_views(ActiveView, State = #state{subscriptions = Subscriptions}) 
     _ ->
       gen_server:cast(self(), update_node)
   end,
+  prometheus_gauge:set(lashup, gm_subscriptions, [], length(Subscriptions1)),
   State#state{subscriptions = Subscriptions1, active_view = ActiveView}.
 
 
@@ -267,6 +244,10 @@ handle_updated_node(_From, UpdatedNode = #{ttl := TTL}, State) when TTL < 0 ->
   State;
 
 handle_updated_node(From, UpdatedNode = #{node := Node}, State) ->
+  prometheus_counter:inc(lashup, gm_updates_total, [], 1),
+  {message_queue_len, MsgQueueLen} =
+    erlang:process_info(self(), message_queue_len),
+  prometheus_gauge:set(lashup, gm_message_queue, [], MsgQueueLen),
   case ets:lookup(members, Node) of
     [] ->
       %% Brand new, store it
@@ -350,6 +331,8 @@ handle_nodedown(Node, State = #state{subscriptions = Subscriptions, subscribers 
   lager:debug("Removing subscription (nodedown) from node: ~p", [Node]),
   Subscriptions1 = lists:keydelete(Node, #subscription.node, Subscriptions),
   Subscribers1 = lists:keydelete(Node, #subscriber.node, Subscribers),
+  prometheus_gauge:set(lashup, gm_subscriptions, [], length(Subscriptions1)),
+  prometheus_gauge:set(lashup, gm_subscribers, [], length(Subscribers1)),
   State#state{subscriptions = Subscriptions1, subscribers = Subscribers1}.
 
 get_membership() ->
@@ -386,11 +369,13 @@ update_node_backoff_loop(Delay, Pid) ->
 
 prune_subscribers(MonitorRef, State = #state{subscribers = Subscribers}) ->
   Subscribers1 = lists:keydelete(MonitorRef, #subscriber.monitor_ref, Subscribers),
+  prometheus_gauge:set(lashup, gm_subscribers, [], length(Subscribers1)),
   State#state{subscribers = Subscribers1}.
 
 prune_subscriptions(MonitorRef, State = #state{subscriptions = Subscription}) ->
-  Subscription1 = lists:keydelete(MonitorRef, #subscription.monitor_ref, Subscription),
-  State#state{subscriptions = Subscription1}.
+  Subscriptions1 = lists:keydelete(MonitorRef, #subscription.monitor_ref, Subscription),
+  prometheus_gauge:set(lashup, gm_subscriptions, [], length(Subscriptions1)),
+  State#state{subscriptions = Subscriptions1}.
 
 
 %% @doc
@@ -431,7 +416,11 @@ handle_get_neighbor_recommendations(ActiveViewSize) ->
 %% ETS write functions
 delete(Member = #member2{}, _State) ->
   lashup_gm_route:delete_node(Member#member2.node),
-  ets:delete(members, Member#member2.node).
+  ets:delete(members, Member#member2.node),
+  prometheus_gauge:set(
+    lashup, gm_members, [],
+    ets:info(members, size)),
+  true.
 
 
 %% TODO:
@@ -445,7 +434,42 @@ persist(Member, _State) ->
       lashup_gm_events:ingest(OldMember, Member);
     [] ->
       ets:insert(members, Member),
+      prometheus_gauge:set(
+        lashup, gm_members, [],
+        ets:info(members, size)),
       lashup_gm_events:ingest(Member)
   end,
   %% Find the component I'm part of
   ok.
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, gm_members},
+    {help, "The size of global membership table."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, gm_subscriptions},
+    {help, "The number of global membership subscriptions."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, gm_subscribers},
+    {help, "The number of global membership subscribers."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, gm_updates_total},
+    {help, "Total number of global membership table updates."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, gm_message_queue},
+    {help, "The length of global membership process message box."}
+  ]).
