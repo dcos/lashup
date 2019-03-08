@@ -15,6 +15,7 @@ init([]) ->
     lashup_kv_sync_tx_fsm:init_metrics(),
     lashup_gm_mc:init_metrics(),
     lashup_gm:init_metrics(),
+    lashup_gm_route:init_metrics(),
     lashup_hyparview_membership:init_metrics(),
 
     {ok, {#{strategy => rest_for_one}, [
