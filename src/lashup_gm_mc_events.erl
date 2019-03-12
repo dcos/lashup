@@ -27,8 +27,7 @@
 
 -spec(ingest(lashup_gm_mc:multicast_packet()) -> ok).
 ingest(MulticastPacket) ->
-  gen_event:notify(?MODULE, {ingest, MulticastPacket}),
-  ok.
+  gen_event:notify(?MODULE, {ingest, MulticastPacket}).
 
 %% @doc
 %% Equivalent to {@link {@module}:remote_subscribe/2} with `Node' set to `node()'
@@ -113,16 +112,5 @@ handle_ingest2(Message, _State = #state{reference = Reference, pid = Pid}) ->
   Payload = lashup_gm_mc:payload(Message),
   Origin = lashup_gm_mc:origin(Message),
   Event = #{payload => Payload, ref => Reference, origin => Origin},
-  Event1 = maybe_add_debug_info(Event, Message),
-  Pid ! {lashup_gm_mc_event, Event1},
+  Pid ! {lashup_gm_mc_event, Event},
   ok.
-
--spec(maybe_add_debug_info(map(), lashup_gm_mc:multicast_packet()) -> map()).
-maybe_add_debug_info(Event, Message) ->
-  case lashup_gm_mc:debug_info(Message) of
-    false ->
-      Event;
-    DebugInfo ->
-      Event#{debug_info => DebugInfo}
-  end.
-

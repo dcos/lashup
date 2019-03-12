@@ -13,14 +13,17 @@
 all() -> [benchmark, basic_events, busy_wait_events].
 
 init_per_testcase(_TestCase, Config) ->
-    application:ensure_all_started(lager),
+    {ok, _} = application:ensure_all_started(lager),
+    ok = application:start(prometheus),
+    ok = lashup_gm_route:init_metrics(),
     {ok, _} = lashup_gm_route:start_link(),
     {ok, _} = lashup_gm_route_events:start_link(),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
     gen_event:stop(lashup_gm_route_events),
-    lashup_gm_route:stop().
+    lashup_gm_route:stop(),
+    ok = application:stop(prometheus).
 
 %% Create a list of X nodes
 %% Until every node has N adjacencies, choose a node another node from the list and make then adjacent

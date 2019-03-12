@@ -17,7 +17,8 @@
   ping_failed/1,
   recognize_pong/1,
   recommend_neighbor/1,
-  update_masters/1
+  update_masters/1,
+  init_metrics/0
 ]).
 
 %% gen_server callbacks
@@ -37,8 +38,6 @@
   fixed_seed :: rand:state(),
   idx = 1 :: pos_integer(),
   unfilled_active_set_count = 0, %% Number of times I've tried to neighbor and I've not seen an active set
-  init_time = erlang:error(init_time_unset) :: integer(),
-  messages = [],
   join_window,
   ping_idx = 1 :: pos_integer(),
   joined = false :: boolean(),
@@ -120,7 +119,7 @@ init([]) ->
   reschedule_ping(60000),
 
   State = #state{passive_view = contact_nodes([]),
-    fixed_seed = FixedSeed, init_time = erlang:system_time(), join_window = Window},
+    fixed_seed = FixedSeed, join_window = Window},
   {ok, State}.
 
 handle_call(stop, _From, State) ->
@@ -152,8 +151,14 @@ handle_call(try_shuffle, _From, State) ->
 handle_cast({do_probe, Node}, State) ->
   State1 = handle_do_probe(Node, State),
   {noreply, check_state(State1)};
-handle_cast(Message = #{message := _}, State) ->
-  State1 = handle_message_cast(Message, State),
+handle_cast(Message = #{message := Type}, State) ->
+  {message_queue_len, MsgQueueLen} =
+    erlang:process_info(self(), message_queue_len),
+  prometheus_gauge:set(lashup, hyparview_message_queue, [], MsgQueueLen),
+  State1 =
+    prometheus_summary:observe_duration(
+      lashup, hyparview_handle_cast_seconds, [Type],
+      fun () -> handle_message_cast(Message, State) end),
   {noreply, State1};
 handle_cast({recognize_pong, Pong}, State) ->
   handle_recognize_pong(Pong, State),
@@ -340,7 +345,7 @@ ping_with_timeout(Node, Timeout) ->
 -spec(join(node()) -> ok).
 join(Node) ->
   {ok, Ref} = timer:send_after(1000, join_failed),
-  gen_server:cast({?MODULE, Node}, #{message => join, sender => node(), ref => Ref}).
+  cast(Node, #{message => join, sender => node(), ref => Ref}).
 
 %% This is ridiculously inefficient on the order of O(N!),
 %% but I'm prototyping
@@ -385,7 +390,7 @@ handle_join(_, State, _) -> State.
 -spec(deny_join(State :: state(), Node :: node(), Ref :: reference()) -> ok).
 deny_join(_State = #state{active_view = ActiveView}, Node, Ref) ->
   Reply = #{message => join_deny, sender => node(), ref => Ref, active_view => ActiveView},
-  gen_server:cast({?MODULE, Node}, Reply).
+  cast(Node, Reply).
 
 -spec(really_handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
@@ -394,9 +399,9 @@ really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
       ARWL = lashup_config:arwl(),
       Fanout = ordsets:del_element(Node, ActiveView),
       ForwardJoinMessage = #{message => forward_join, node => Node, ttl => ARWL, sender => node(), seen => [node()]},
-      gen_server:abcast(Fanout, ?MODULE, ForwardJoinMessage),
+      abcast(Fanout, ForwardJoinMessage),
       Reply = #{message => join_success, sender => node(), ref => Ref, passive_view => PassiveView},
-      gen_server:cast({?MODULE, Node}, Reply),
+      cast(Node, Reply),
       JoinWindow1 = lashup_utils:add_tick(JoinWindow),
       NewState#state{join_window = JoinWindow1};
     {error, NewState} ->
@@ -526,7 +531,7 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}
 forward_forward_join1(ForwardJoin, Nodes) when is_list(Nodes) ->
   Idx = rand:uniform(length(Nodes)),
   TargetNode = lists:nth(Idx, Nodes),
-  gen_server:cast({?MODULE, TargetNode}, ForwardJoin).
+  cast(TargetNode, ForwardJoin).
 
 %% TODO:
 %% Maybe we should disconnect from the node at this point?
@@ -626,7 +631,7 @@ send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(Passiv
 send_neighbor_to(Timeout, Node, Priority) when is_integer(Timeout) ->
   lager:debug("Sending neighbor to: ~p", [Node]),
   Ref = timer:send_after(Timeout * 3, {tried_neighbor, Node}),
-  gen_server:cast({?MODULE, Node}, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
+  cast(Node, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
 
 -spec(handle_neighbor(neighbor(), state()) -> state()).
 handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
@@ -635,8 +640,7 @@ handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
   %% The Active neighbor list is full
   lager:info("Denied neighbor request from ~p because active view full", [Sender]),
   PassiveView = State#state.passive_view,
-  gen_server:cast({?MODULE, Sender},
-    #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView}),
+  cast(Sender, #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView}),
   State;
 
 %% Either this is a high priority request
@@ -644,12 +648,12 @@ handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
 handle_neighbor(_Neighbor = #{sender := Sender, ref := Ref}, State) ->
   case try_add_node_to_active_view(Sender, State) of
     {ok, NewState} ->
-      gen_server:cast({?MODULE, Sender}, #{message => neighbor_accept, sender => node(), ref => Ref}),
+      cast(Sender, #{message => neighbor_accept, sender => node(), ref => Ref}),
       NewState;
     {error, NewState = #state{passive_view = PassiveView}} ->
       lager:warning("Failed to add neighbor ~p to active view on neighbor message", [Sender]),
       NeighborDeny = #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView},
-      gen_server:cast({?MODULE, Sender}, NeighborDeny),
+      cast(Sender, NeighborDeny),
       NewState
   end.
 
@@ -752,7 +756,13 @@ check_views(_State = #state{active_view = ActiveView, passive_view = PassiveView
       error(self_in_passive_view);
     _ -> ok
   end,
-  ok.
+  prometheus_gauge:set(
+    lashup, hyparview_active_view_size, [],
+    length(ActiveView)),
+  prometheus_gauge:set(
+    lashup, hyparview_passive_view_size, [],
+    length(PassiveView)).
+
 %% End check_state
 contact_nodes(_State = #state{extra_masters = ExtraMasters}) ->
   contact_nodes(ExtraMasters);
@@ -780,7 +790,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
     Else ->
       NewShuffle = Shuffle#{sender := node(), ttl := TTL - 1},
       NextNode = choose_node(Else),
-      gen_server:cast({?MODULE, NextNode}, NewShuffle),
+      cast(NextNode, NewShuffle),
       State
   end.
 do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemotePassiveView, node := Node},
@@ -788,7 +798,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
   ReplyNodes1 = ordsets:subtract(MyPassiveView, RemoteActiveView),
   ReplyNodes2 = ordsets:subtract(ReplyNodes1, RemotePassiveView),
   ShuffleReply = #{message => shuffle_reply, node => node(), combined_view => ReplyNodes2},
-  gen_server:cast({?MODULE, Node}, ShuffleReply),
+  cast(Node, ShuffleReply),
   schedule_disconnect(Node),
 
   LargeCombinedView = ordsets:union([MyPassiveView, RemoteActiveView, RemotePassiveView]),
@@ -815,7 +825,7 @@ try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView
     ttl => 5
   },
   Node = choose_node(ActiveView),
-  gen_server:cast({?MODULE, Node}, Shuffle),
+  cast(Node, Shuffle),
   case length(PassiveView) of
     Size when Size < 0.5 * PVS ->
       5000;
@@ -949,7 +959,7 @@ disconnect_node(Node, State = #state{monitors = Monitors, active_view = ActiveVi
       DisconnectMessage = #{message => disconnect, sender => node()},
       case lists:member(Node, nodes()) of
         true ->
-          gen_server:cast({?MODULE, Node}, DisconnectMessage);
+          cast(Node, DisconnectMessage);
         false ->
           ok
       end,
@@ -1010,6 +1020,54 @@ handle_recognize_pong(_Pong = #{now := _Now, receiving_node := Node},
       lager:warning("Pong from unknown node: ~p, not in active nor passive veiws", [Node])
   end.
   %% {true, true} should never happen. If it does, we _should_ crash.
+
+-spec(cast(node(), hyparview_message()) -> ok).
+cast(Node, #{message := Type} = Message) ->
+  prometheus_counter:inc(lashup, hyparview_cast_messages_total, [Type], 1),
+  gen_server:cast({?MODULE, Node}, Message).
+
+-spec(abcast([node()], hyparview_message()) -> ok).
+abcast(Nodes, Message) ->
+  lists:foreach(fun (Node) -> cast(Node, Message) end, Nodes).
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, hyparview_active_view_size},
+    {help, "The size of HyParView Active View."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, hyparview_passive_view_size},
+    {help, "The size of HyParView Passive View."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, hyparview_cast_messages_total},
+    {labels, [type]},
+    {help, "Total number of HyParView messages sent to other nodes."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, hyparview_handle_cast_seconds},
+    {labels, [type]},
+    {duration_unit, seconds},
+    {help, "The time spent processing HyParView messages from other nodes."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, hyparview_message_queue},
+    {help, "The length of HyParView process message box."}
+  ]).
+
+%%%===================================================================
+%%% Test functions
+%%%===================================================================
 
 -ifdef(TEST).
 trim_test() ->

@@ -19,7 +19,8 @@
   first_key/0,
   next_key/1,
   read_lclock/1,
-  write_lclock/2
+  write_lclock/2,
+  init_metrics/0
 ]).
 
 %% gen_server callbacks
@@ -70,16 +71,24 @@ request_op(Key, Op) ->
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
+  Begin = erlang:monotonic_time(),
   Pid = whereis(?MODULE),
   Args = {op, Key, VClock, Op},
   MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
-    {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
-      {error, overflow};
-    {message_queue_len, _MsgQueueLen} ->
-      gen_server:call(Pid, Args, infinity)
+    {message_queue_len, MsgQueueLen} ->
+      prometheus_gauge:set(lashup, kv_message_queue, [], MsgQueueLen),
+      case MsgQueueLen > MaxMsgQueueLen of
+        false ->
+          gen_server:call(Pid, Args, infinity);
+        true -> {error, overflow}
+      end
   catch error:badarg ->
     exit({noproc, {gen_server, call, [?MODULE, Args]}})
+  after
+    prometheus_summary:observe(
+      lashup, kv_request_op_seconds, [],
+      erlang:monotonic_time() - Begin)
   end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
@@ -91,7 +100,6 @@ value(Key) ->
   {_, KV} = op_getkv(Key),
   riak_dt_map:value(KV#kv2.map).
 
-
 -spec(value2(Key :: key()) -> {riak_dt_map:value(), riak_dt_vclock:vclock()}).
 value2(Key) ->
   {_, KV} = op_getkv(Key),
@@ -99,27 +107,33 @@ value2(Key) ->
 
 -spec(raw_value(key()) -> kv2raw() | false).
 raw_value(Key) ->
-  case mnesia:dirty_read(?KV_TABLE, Key) of
-    [#kv2{map=Map, vclock=VClock, lclock=LClock}] ->
+  case op_getkv(Key) of
+    {existing, #kv2{map=Map, vclock=VClock, lclock=LClock}} ->
       #{key => Key, value => Map, vclock => VClock, lclock => LClock};
-    [] -> false
+    {new, _Value} ->
+      false
   end.
 
 -spec(descends(key(), riak_dt_vclock:vclock()) -> boolean()).
 descends(Key, VClock) ->
   %% Check if LocalVClock is a direct descendant of the VClock
-  case mnesia:dirty_read(?KV_TABLE, Key) of
-    [] -> false;
-    [#kv2{vclock = LocalVClock}] ->
-      riak_dt_vclock:descends(LocalVClock, VClock)
+  case op_getkv(Key) of
+    {existing, #kv2{vclock = LocalVClock}} ->
+      riak_dt_vclock:descends(LocalVClock, VClock);
+    {new, _Value} ->
+      false
   end.
 
 -spec(subscribe(ets:match_spec()) -> {ok, ets:comp_match_spec(), [kv2map()]}).
 subscribe(MatchSpec) ->
+  Begin = erlang:monotonic_time(),
   ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
   mnesia:subscribe({table, ?KV_TABLE, detailed}),
   MatchSpecKV2 = matchspec_kv2(MatchSpec),
   Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
+  prometheus_summary:observe(
+    lashup, kv_backend_read_seconds, [kv2],
+    erlang:monotonic_time() - Begin),
   {ok, ets:match_spec_compile(MatchSpecKV2),
    lists:map(fun kv2map/1, Records)}.
 
@@ -133,11 +147,15 @@ handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
 
 -spec(first_key() -> key() | '$end_of_table').
 first_key() ->
-  mnesia:dirty_first(?KV_TABLE).
+  prometheus_summary:observe_duration(
+    lashup, kv_backend_read_seconds, [kv2],
+    fun () -> mnesia:dirty_first(?KV_TABLE) end).
 
 -spec(next_key(key()) -> key() | '$end_of_table').
 next_key(Key) ->
-  mnesia:dirty_next(?KV_TABLE, Key).
+  prometheus_summary:observe_duration(
+    lashup, kv_backend_read_seconds, [kv2],
+    fun () -> mnesia:dirty_next(?KV_TABLE, Key) end).
 
 -spec(read_lclock(node()) -> lclock()).
 read_lclock(Node) ->
@@ -145,13 +163,18 @@ read_lclock(Node) ->
 
 -spec(write_lclock(node(), lclock()) -> ok | {error, term()}).
 write_lclock(Node, LClock) ->
+  Begin = erlang:monotonic_time(),
   Fun = fun () -> mnesia:write(#nclock{key = Node, lclock = LClock}) end,
-  case mnesia:sync_transaction(Fun) of
+  try mnesia:sync_transaction(Fun) of
     {atomic, _} ->
       ok;
     {aborted, Reason} ->
       lager:error("Couldn't write to nclock table because ~p", [Reason]),
       {error, Reason}
+  after
+    prometheus_summary:observe(
+      lashup, kv_backend_write_seconds, [nclock],
+      erlang:monotonic_time() - Begin)
   end.
 
 -spec(start_link() ->
@@ -189,11 +212,14 @@ handle_cast(_Request, State) ->
 
 handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref = Ref}) ->
   MaxMsgQueueLen = max_message_queue_len(),
-  case erlang:process_info(self(), message_queue_len) of
-    {message_queue_len, MsgQueueLen} when MsgQueueLen > MaxMsgQueueLen ->
+  {message_queue_len, MsgQueueLen} =
+    erlang:process_info(self(), message_queue_len),
+  prometheus_gauge:set(lashup, kv_message_queue, [], MsgQueueLen),
+  case MsgQueueLen > MaxMsgQueueLen of
+    true ->
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
       {noreply, State};
-    {message_queue_len, _MsgQueueLen} ->
+    false ->
       State1 = handle_lashup_gm_mc_event(Event, State),
       {noreply, State1}
   end;
@@ -278,7 +304,7 @@ get_record_info(nclock) ->
 mk_write_fun(Key, OldVClock, Op) ->
   fun() ->
     {NewKV, NClock} =
-      case mnesia:read(?KV_TABLE, Key, write) of
+      case safe_read(?KV_TABLE, Key) of
         [] ->
           prepare_kv(Key, riak_dt_map:new(), riak_dt_vclock:fresh(), Op);
         [#kv2{vclock = VClock}] when OldVClock =/= undefined andalso VClock =/= OldVClock ->
@@ -290,11 +316,17 @@ mk_write_fun(Key, OldVClock, Op) ->
       {error, Error} ->
         mnesia:abort(Error);
       ok ->
-        mnesia:write(NewKV),
-        mnesia:write(NClock)
+        op_write(NewKV),
+        op_write(NClock)
     end,
     NewKV
   end.
+
+-spec(safe_read(Table :: atom(), Key :: key()) -> [kv()]).
+safe_read(Table, Key) ->
+  prometheus_summary:observe_duration(
+    lashup, kv_backend_read_seconds, [Table],
+    fun () -> mnesia:read(Table, Key, write) end).
 
 -spec(prepare_kv(Key :: key(), Map0 :: riak_dt_map:dt_map(), VClock0 :: riak_dt_vclock:vclock() | undefined,
       Op :: riak_dt_map:map_op()) -> {kv(), nclock()}).
@@ -304,7 +336,11 @@ prepare_kv(Key, Map0, VClock0, Op) ->
   Counter = riak_dt_vclock:get_counter(Node, VClock1),
   Dot = {Node, Counter},
   Map2 =
-    case riak_dt_map:update(Op, Dot, Map0) of
+    case
+      prometheus_summary:observe_duration(
+        lashup, kv_crdt_seconds, [],
+        fun () -> riak_dt_map:update(Op, Dot, Map0) end)
+    of
       {ok, Map1} -> Map1;
       {error, {precondition, {not_present, _Field}}} -> Map0
     end,
@@ -316,9 +352,10 @@ prepare_kv(Key, Map0, VClock0, Op) ->
 -spec handle_op(Key :: term(), Op :: riak_dt_map:map_op(), OldVClock :: riak_dt_vclock:vclock() | undefined,
     State :: state()) -> {Reply :: term(), State1 :: state()}.
 handle_op(Key, Op, OldVClock, State) ->
+  Begin = erlang:monotonic_time(),
   %% We really want to make sure this persists and we don't have backwards traveling clocks
   Fun = mk_write_fun(Key, OldVClock, Op),
-  case mnesia:sync_transaction(Fun) of
+  try mnesia:sync_transaction(Fun) of
     {atomic, NewKV} ->
       ok = mnesia:sync_log(),
       dumped = mnesia:dump_log(),
@@ -327,6 +364,10 @@ handle_op(Key, Op, OldVClock, State) ->
       {{ok, NewValue}, State};
     {aborted, Reason} ->
       {{error, Reason}, State}
+  after
+    prometheus_summary:observe(
+      lashup, kv_handle_op_seconds, [],
+      erlang:monotonic_time() - Begin)
   end.
 
 %% TODO: Add metrics
@@ -354,30 +395,46 @@ propagate(_KV = #kv2{key = Key, map = Map, vclock = VClock}) ->
 % @private either gets the KV object for a given key, or returns an empty one
 -spec(op_getkv(key()) -> {new, kv()} | {existing, kv()}).
 op_getkv(Key) ->
-  case mnesia:dirty_read(?KV_TABLE, Key) of
+  Begin = erlang:monotonic_time(),
+  try mnesia:dirty_read(?KV_TABLE, Key) of
     [] ->
       {new, #kv2{key = Key}};
     [KV] ->
       {existing, KV}
+  after
+    prometheus_summary:observe(
+      lashup, kv_backend_read_seconds, [kv2],
+    erlang:monotonic_time() - Begin)
   end.
 
 -spec(op_getkeys(ets:match_spec()) -> [key()]).
 op_getkeys(MatchSpec) ->
-  Keys = mnesia:dirty_all_keys(?KV_TABLE),
+  Keys = op_dirty_all_keys(?KV_TABLE),
   MatchSpecCompiled = ets:match_spec_compile(MatchSpec),
   [Key || Key <- Keys, [true] == ets:match_spec_run([{Key}], MatchSpecCompiled)].
+
+-spec(op_dirty_all_keys(Table :: atom()) -> [term()]).
+op_dirty_all_keys(Table) ->
+  prometheus_summary:observe_duration(
+    lashup, kv_backend_read_seconds, [Table],
+    fun () -> mnesia:dirty_all_keys(Table) end).
 
 -spec(get_lclock(node()) -> lclock()).
 get_lclock(Key) ->
   get_lclock(fun mnesia:read/2, Key).
 
 -spec(get_lclock(fun(), node()) -> lclock()).
-get_lclock(READ, Key) ->
-  case READ(nclock, Key) of
+get_lclock(ReadFun, Key) ->
+  Begin = erlang:monotonic_time(),
+  try ReadFun(nclock, Key) of
     [] ->
       ?INIT_LCLOCK;
     [#nclock{lclock = LClock}] ->
       LClock
+  after
+    prometheus_summary:observe(
+      lashup, kv_backend_read_seconds, [nclock],
+    erlang:monotonic_time() - Begin)
   end.
 
 -spec(handle_lashup_gm_mc_event(map(), state()) -> state()).
@@ -398,8 +455,8 @@ mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
         LClock1 = increment_lclock(LClock0),
         KV = #kv2{key = Key, vclock = RemoteVClock, map = RemoteMap, lclock = LClock1},
         NClock = #nclock{key = node(), lclock = LClock1},
-        ok = mnesia:write(KV),
-        ok = mnesia:write(NClock),
+        ok = op_write(KV),
+        ok = op_write(NClock),
         KV;
       [KV] ->
         maybe_full_update(should_full_update(KV, RemoteMap, RemoteVClock))
@@ -410,8 +467,8 @@ mk_full_update_fun(Key, RemoteMap, RemoteVClock) ->
 maybe_full_update({false, KV, _}) ->
   KV;
 maybe_full_update({true, KV, NClock}) ->
-  ok = mnesia:write(KV),
-  ok = mnesia:write(NClock),
+  ok = op_write(KV),
+  ok = op_write(NClock),
   KV.
 
 -spec(should_full_update(LocalKV :: kv(), RemoteMap :: riak_dt_map:dt_map(),
@@ -435,7 +492,10 @@ should_full_update(LocalKV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock
         RemoteVClock :: riak_dt_vclock:vclock()) ->
   {true, kv(), nclock()}).
 create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
-  Map1 = riak_dt_map:merge(RemoteMap, KV#kv2.map),
+  Map1 =
+    prometheus_summary:observe_duration(
+      lashup, kv_crdt_seconds, [],
+      fun () -> riak_dt_map:merge(RemoteMap, KV#kv2.map) end),
   VClock1 = riak_dt_vclock:merge([LocalVClock, RemoteVClock]),
   LClock0 = get_lclock(node()),
   LClock1 = increment_lclock(LClock0),
@@ -445,8 +505,12 @@ create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
 
 -spec(handle_full_update(map(), state()) -> state()).
 handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := RemoteMap}, State) ->
+  Begin = erlang:monotonic_time(),
   Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
   {atomic, _} = mnesia:sync_transaction(Fun),
+  prometheus_summary:observe(
+    lashup, kv_handle_full_update_seconds, [],
+    erlang:monotonic_time() - Begin),
   State.
 
 increment_lclock(N) ->
@@ -470,3 +534,72 @@ kv2map(New, [Old | _]) ->
   Map = kv2map(New),
   #{value := OldValue} = kv2map(Old),
   Map#{old_value => OldValue}.
+
+-spec(op_write(tuple()) -> ok).
+op_write(Record) ->
+  Table = element(1, Record),
+  prometheus_summary:observe_duration(
+    lashup, kv_backend_write_seconds, [Table],
+    fun () -> mnesia:write(Record) end).
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  init_kv_metrics(),
+  init_op_metrics(),
+  init_backend_metrics().
+
+-spec(init_kv_metrics() -> ok).
+init_kv_metrics() ->
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_handle_op_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent processing KV operations."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_handle_full_update_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent processing KV full updates."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, kv_message_queue},
+    {help, "The length of KV process message box."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_crdt_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent merging/updating CRDT in KV process."}
+  ]).
+
+-spec(init_op_metrics() -> ok).
+init_op_metrics() ->
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_request_op_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent waiting for processing KV operations."}
+  ]).
+
+-spec(init_backend_metrics() -> ok).
+init_backend_metrics() ->
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_backend_read_seconds},
+    {labels, [table]},
+    {duration_unit, seconds},
+    {help, "The time spent reading data from KV backend."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_backend_write_seconds},
+    {labels, [table]},
+    {duration_unit, seconds},
+    {help, "The time spent writing data to KV backend."}
+  ]).

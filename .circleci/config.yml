@@ -48,3 +48,5 @@ jobs:
           name: Sending cover report
           command: |
               codecov -X gcov -f _build/test/covertool/lashup.covertool.xml
+      - store_artifacts:
+          path: ~/lashup/_build/test/logs

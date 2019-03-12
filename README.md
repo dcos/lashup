@@ -87,13 +87,7 @@ Then you can simply call `lashup_kv_events_helper:start_link(ets:fun2ms(fun({[no
 
 ### Multicast
 
-The simplest way to use the multicast API is to call `lashup_gm_events:subscribe([Topic])`. All updates to `Topic` are streamed to the caller. You can send updates to a topic via `lashup_gm_mc:multicast(Topic, Data, Options)`, where `Topic` is the aforementioned topic, and `Data` is whatever you'd like. There are a few options available:
-
-* `record_route`
-* `loop`
-* `{fanout, Fanout}`
-* `{ttl, TTL}`
-* `{only_nodes, Nodes}`
+The simplest way to use the multicast API is to call `lashup_gm_events:subscribe([Topic])`. All updates to `Topic` are streamed to the caller. You can send updates to a topic via `lashup_gm_mc:multicast(Topic, Data)`, where `Topic` is the aforementioned topic, and `Data` is whatever you'd like.
 
 <!-- Badges -->
 [circleci badge]: https://img.shields.io/circleci/project/github/dcos/lashup/master.svg?style=flat-square

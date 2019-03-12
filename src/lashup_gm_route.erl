@@ -32,7 +32,8 @@
   reverse_children/2,
   children/2,
   prune_tree/2,
-  flush_events_helper/0
+  flush_events_helper/0,
+  init_metrics/0
 ]).
 
 
@@ -268,6 +269,9 @@ handle_event(internal, maybe_advertise_state, _StateName, StateData = #state{eve
   {next_state, busy, StateData};
 handle_event(internal, maybe_advertise_state, _StateName, StateData0 = #state{events = EC}) ->
   {StateData1, {tree, Tree}} = handle_get_tree(node(), StateData0),
+  prometheus_gauge:set(
+    lashup, gm_unreachable_nodes, [],
+    length(unreachable_nodes(Tree))),
   lashup_gm_route_events:ingest(Tree),
   {next_state, cached, StateData1#state{events = EC + 1}};
 
@@ -434,13 +438,35 @@ update_adjacency(Current, Neighbor, {Queue, Tree}) ->
       {Queue, Tree}
   end.
 
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, gm_unreachable_nodes},
+    {help, "The number of unreachable nodes in the global membership table."}
+  ]).
+
+%%%===================================================================
+%%% Test functions
+%%%===================================================================
+
 -ifdef(TEST).
 
 proper_test_() ->
-  {timeout,
-    3600,
-    [fun proper/0]
+  {setup, fun setup/0, fun cleanup/1,
+    {timeout, 3600, [fun proper/0]}
   }.
+
+setup() ->
+  ok = application:start(prometheus),
+  init_metrics().
+
+cleanup(_) ->
+  ok = application:stop(prometheus).
 
 proper() ->
   [] = proper:module(?MODULE, [{numtests, 10000}]).

@@ -4,13 +4,16 @@
 -behaviour(gen_statem).
 
 %% API
--export([start_link/2]).
+-export([
+    start_link/2,
+    init_metrics/0
+]).
 
 
 %% Internal APIs
 -export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
--export([rx_sync/3]).
+-export([handle/3]).
 
 -record(state, {node, monitor_ref, remote_pid}).
 
@@ -23,7 +26,7 @@ start_link(Node, RemotePID) ->
 init([Node, RemotePid]) ->
     MonitorRef = monitor(process, RemotePid),
     StateData = #state{node = Node, monitor_ref = MonitorRef, remote_pid = RemotePid},
-    {ok, rx_sync, StateData, []}.
+    {ok, handle, StateData, []}.
 
 callback_mode() ->
     state_functions.
@@ -34,6 +37,13 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
 terminate(Reason, State, _Data) ->
     lager:warning("KV AAE RX FSM terminated (~p): ~p", [State, Reason]).
 
+handle(info, Message = #{from := RemotePID}, StateData = #state{remote_pid = RemotePID}) ->
+    Size = erlang:external_size(Message),
+    prometheus_counter:inc(lashup, aae_rx_messages_total, [], 1),
+    prometheus_counter:inc(lashup, aae_rx_bytes_total, [], Size),
+    rx_sync(info, Message, StateData);
+handle(Type, Message, StateData) ->
+    rx_sync(Type, Message, StateData).
 
 rx_sync(info, Disconnect = {'DOWN', MonitorRef, _Type, _Object, _Info}, #state{monitor_ref = MonitorRef}) ->
     handle_disconnect(Disconnect);
@@ -70,3 +80,20 @@ handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
     lager:warning("Lashup AAE TX Process disconnected: ~p", [Reason]),
     {stop, normal}.
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+    prometheus_counter:new([
+        {registry, lashup},
+        {name, aae_rx_bytes_total},
+        {help, "Total number of AAE RX bytes received by node."}
+    ]),
+    prometheus_counter:new([
+        {registry, lashup},
+        {name, aae_rx_messages_total},
+        {help, "Total number of AAE RX messages received by node."}
+    ]).

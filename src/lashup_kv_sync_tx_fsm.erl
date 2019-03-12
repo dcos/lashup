@@ -4,7 +4,10 @@
 -behaviour(gen_statem).
 
 %% API
--export([start_link/1]).
+-export([
+    start_link/1,
+    init_metrics/0
+]).
 
 -export([init/3, tx_sync/3, idle/3]).
 
@@ -103,12 +106,12 @@ finish_sync(RemotePID) ->
     erlang:garbage_collect(self()),
     %% This is to ensure that all messages have flushed
     Message = #{from => self(), message => done},
-    erlang:send(RemotePID, Message, [noconnect]).
+    send(RemotePID, Message).
 
 send_key_vclock(Key, RemotePID) ->
     #{vclock := VClock, lclock := KeyClock} = lashup_kv:raw_value(Key),
     Message = #{from => self(), key => Key, vclock => VClock, message => keydata},
-    erlang:send(RemotePID, Message, [noconnect]),
+    send(RemotePID, Message),
     KeyClock.
 
 defer_sync_key(Key) ->
@@ -132,3 +135,29 @@ handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
     lager:warning("Lashup AAE RX Process disconnected: ~p", [Reason]),
     {stop, normal}.
+
+send(RemotePID, Message) ->
+    try
+        erlang:send(RemotePID, Message, [noconnect])
+    after
+        Size = erlang:external_size(Message),
+        prometheus_counter:inc(lashup, aae_tx_messages_total, [], 1),
+        prometheus_counter:inc(lashup, aae_tx_bytes_total, [], Size)
+    end.
+
+%%%===================================================================
+%%% Metrics functions
+%%%===================================================================
+
+-spec(init_metrics() -> ok).
+init_metrics() ->
+    prometheus_counter:new([
+        {registry, lashup},
+        {name, aae_tx_bytes_total},
+        {help, "Total number of AAE TX bytes sent by node."}
+    ]),
+    prometheus_counter:new([
+        {registry, lashup},
+        {name, aae_tx_messages_total},
+        {help, "Total number of AAE TX messages sent by node."}
+    ]).

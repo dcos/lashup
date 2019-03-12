@@ -7,7 +7,8 @@
         kernel,
         stdlib,
         lager,
-        riak_dt
+        riak_dt,
+        prometheus
     ]},
     {mod, {lashup_app, []}},
     {env, []}

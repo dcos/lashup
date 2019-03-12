@@ -2,6 +2,7 @@
 -author("sdhillon").
 
 -include_lib("common_test/include/ct.hrl").
+-include_lib("eunit/include/eunit.hrl").
 
 -export([
     all/0,
@@ -230,20 +231,12 @@ mc_test(Config) ->
     %% Test general messaging
     {ok, Topic1RefNode1} = lashup_gm_mc_events:remote_subscribe(Node1, [topic1]),
     R1 = make_ref(),
-    rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R1, [record_route]]),
-    true = ?MAX_MC_REPLICATION == expect_replies(Topic1RefNode1, R1),
+    rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R1]),
+    ?assertEqual(?MAX_MC_REPLICATION, expect_replies(Topic1RefNode1, R1)),
     timer:sleep(5000),
     %% Make sure that we don't see "old" events
     {ok, Topic1RefNode3} = lashup_gm_mc_events:remote_subscribe(Node3, [topic1]),
-    true = 0 == expect_replies(Topic1RefNode3, R1),
-    %% Test only nodes
-    R2 = make_ref(),
-    rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R2, [{only_nodes, [Node3]}]]),
-    true = ?MAX_MC_REPLICATION == expect_replies(Topic1RefNode3, R2),
-    true = 0 == expect_replies(Topic1RefNode1, R2),
-    R3 = make_ref(),
-    rpc:call(Node2, lashup_gm_mc, multicast, [topic1, R3, [{fanout, 1}]]),
-    true = 1 == expect_replies(Topic1RefNode1, R3),
+    ?assertEqual(0, expect_replies(Topic1RefNode3, R1)),
     ok.
 
 
