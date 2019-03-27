@@ -41,7 +41,6 @@
   join_window,
   ping_idx = 1 :: pos_integer(),
   joined = false :: boolean(),
-  extra_masters = [] :: [node()],
   shuffle_interval = lashup_config:shuffle_interval() :: non_neg_integer(),
   join_interval = lashup_config:join_interval() :: non_neg_integer(),
   active_view_size = lashup_config:active_view_size() :: non_neg_integer(),
@@ -95,7 +94,7 @@ get_passive_view() ->
 
 -spec update_masters([node()]) -> ok.
 update_masters(Nodes) ->
-  gen_server:call(?MODULE, {update_masters, Nodes}).
+  lashup_config:update_contact_nodes(Nodes).
 
 -spec(start_link() ->
   {ok, Pid :: pid()} | ignore | {error, Reason :: term()}).
@@ -118,22 +117,12 @@ init([]) ->
   Window = lashup_utils:new_window(1000),
   reschedule_ping(60000),
 
-  State = #state{passive_view = contact_nodes([]),
+  State = #state{passive_view = lashup_config:contact_nodes(),
     fixed_seed = FixedSeed, join_window = Window},
   {ok, State}.
 
 handle_call(stop, _From, State) ->
   {stop, normal, State};
-handle_call({update_masters, Nodes}, _From, State = #state{extra_masters = ExtraMasters}) ->
-  Nodes0 = ordsets:from_list(Nodes),
-  State0 =
-    case ordsets:del_element(node(), Nodes0) of
-      ExtraMasters ->
-        State;
-      Masters ->
-        check_state(State#state{extra_masters = Masters})
-    end,
-  {reply, ok, State0};
 handle_call({do_connect, Node}, _From, State) when is_atom(Node) ->
   send_neighbor_to(5000, Node, high),
   {reply, ok, State};
@@ -203,7 +192,7 @@ handle_info(join_failed, State) ->
 handle_info(try_join, State = #state{joined = true}) ->
   {noreply, State};
 handle_info(try_join, State) ->
-  try_do_join(State),
+  try_do_join(),
   {noreply, State};
 handle_info({tried_neighbor, Node}, State = #state{passive_view = PassiveView}) ->
   PassiveView1 = ordsets:del_element(Node, PassiveView),
@@ -296,9 +285,9 @@ choose_node(Nodes) when length(Nodes) > 0 ->
   lists:nth(NodeIdx, Nodes).
 
 %% JOIN CODE
--spec try_do_join(State :: state()) -> error | ok.
-try_do_join(State) ->
-  case do_join(State) of
+-spec try_do_join() -> error | ok.
+try_do_join() ->
+  case do_join() of
     ok ->
       ok;
     _ ->
@@ -306,9 +295,9 @@ try_do_join(State) ->
       error
   end.
 
--spec(do_join(State :: state()) -> ok | {error, Reason :: term()}).
-do_join(State) ->
-  ContactNodes = contact_nodes(State),
+-spec(do_join() -> ok | {error, Reason :: term()}).
+do_join() ->
+  ContactNodes = lashup_config:contact_nodes(),
   case ContactNodes of
     [] ->
       {error, no_contact_nodes};
@@ -411,7 +400,7 @@ really_handle_join(Node, State = #state{join_window = JoinWindow}, Ref) ->
 -spec(handle_join_deny(join_deny(), state()) -> state()).
 handle_join_deny(_JoinDeny =  #{message := join_deny, sender := Sender, ref := Ref, active_view := RemoteActiveView},
     State = #state{active_view = []})->
-  ContactNodes = contact_nodes(State),
+  ContactNodes = lashup_config:contact_nodes(),
   ProhibitedNodes = ordsets:add_element(Sender, ContactNodes),
   case ordsets:subtract(RemoteActiveView, ProhibitedNodes) of
     [] ->
@@ -578,7 +567,7 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
     %% Hydrate the passive view with contact nodes, and reschedule immediately
     {[], []} ->
       reschedule_maybe_neighbor(500),
-      ContactNodes = ordsets:from_list(contact_nodes(State)),
+      ContactNodes = lashup_config:contact_nodes(),
       State#state{passive_view = ContactNodes};
     %% We have nodes in the active view, but none in the passive view
     %% This is concerning, but not necessarily bad
@@ -586,7 +575,7 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
     {ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
       lager:debug("Trying to connect to node from passive view, but passive view empty"),
-      ContactNodes = ordsets:from_list(contact_nodes(State)),
+      ContactNodes = lashup_config:contact_nodes(),
       UnconnectedContactNodes = ordsets:subtract(ContactNodes, ActiveView),
       State#state{passive_view = UnconnectedContactNodes};
     %% If we have nodes in the passive view, let's try to connect to them
@@ -762,15 +751,6 @@ check_views(_State = #state{active_view = ActiveView, passive_view = PassiveView
   prometheus_gauge:set(
     lashup, hyparview_passive_view_size, [],
     length(PassiveView)).
-
-%% End check_state
-contact_nodes(_State = #state{extra_masters = ExtraMasters}) ->
-  contact_nodes(ExtraMasters);
-contact_nodes(ExtraMasters) ->
-  ContactNodes = ordsets:from_list(lashup_config:contact_nodes()),
-  AllMasters = ordsets:union(ContactNodes, ExtraMasters),
-  ordsets:del_element(node(), AllMasters).
-
 
 -spec(handle_shuffle(Shuffle :: shuffle(), state()) -> state()).
 handle_shuffle(Shuffle = #{ttl := 0}, State) ->

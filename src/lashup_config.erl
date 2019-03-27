@@ -49,7 +49,8 @@
   min_ping_ms/0,
   max_ping_ms/0,
   ping_log_base/0,
-  aae_route_event_wait/0
+  aae_route_event_wait/0,
+  update_contact_nodes/1
 ]).
 
 %% @doc
@@ -83,9 +84,10 @@ join_timeout() ->
   get_env(join_timeout, 250).
 
 %%
--spec(contact_nodes() -> [node()]).
+-spec(contact_nodes() -> ordsets:ordset(node())).
 contact_nodes() ->
-  get_env(contact_nodes, []).
+  Nodes = ordsets:from_list(get_env(contact_nodes, [])),
+  ordsets:del_element(node(), Nodes).
 
 %% We handle reactive changes a little bit differently than the paper.
 %% In empirical testing, making everything reactive resulted in a thundering herd
@@ -186,3 +188,7 @@ aae_route_event_wait() ->
 
 get_env(Var, Default) ->
   application:get_env(lashup, Var, Default).
+
+-spec(update_contact_nodes([node()]) -> ok).
+update_contact_nodes(Nodes) ->
+  application:set_env(lashup, contact_nodes, Nodes).
