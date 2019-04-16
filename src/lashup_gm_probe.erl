@@ -107,7 +107,7 @@ maybe_do_probe(_State) ->
 
 -spec(do_probe(lashup_gm_route:tree()) -> ok).
 do_probe(Tree) ->
-   case lashup_gm_route:unreachable_nodes(Tree) of
+   case unreachable_nodes(Tree) of
     [] ->
       schedule_next_probe(),
       ok;
@@ -118,6 +118,15 @@ do_probe(Tree) ->
       schedule_next_probe(ProbeTime),
       ok
   end.
+
+-spec(unreachable_nodes(lashup_gm_route:tree()) -> [node()]).
+unreachable_nodes(Tree) ->
+  UnreachableNodes = lashup_gm_route:unreachable_nodes(Tree),
+  UnreachableContactNodes =
+    lists:filter(fun (Node) ->
+      lashup_gm_route:distance(Node, Tree) =:= infinity
+    end, lashup_config:contact_nodes()),
+  lists:usort(UnreachableNodes ++ UnreachableContactNodes).
 
 -spec(probe_oneof(UnreachableNodes :: [node()]) -> ok).
 probe_oneof(UnreachableNodes) ->
