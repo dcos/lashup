@@ -80,9 +80,9 @@ kv_subscribe(_Config) ->
                       {assign, red, erlang:system_time(nano_seconds)}
                   }]
               }),
-    {ok, Ref} = lashup_kv_events_helper:start_link(ets:fun2ms(fun({flag}) -> true end)),
+    {ok, Ref} = lashup_kv:subscribe(ets:fun2ms(fun({flag}) -> true end)),
     receive
-        {lashup_kv_events, #{type := ingest_new, ref := Ref}} ->
+        {lashup_kv_event, Ref, flag} ->
             ok
     after 5000 ->
         ct:fail("Nothing received")
@@ -94,17 +94,12 @@ kv_subscribe(_Config) ->
                   }]
               }),
     receive
-        {lashup_kv_events, #{type := ingest_update, ref := Ref, value := Value, old_value := OldValue}} ->
-            case {Value, OldValue} of
-                {[{{color, riak_dt_lwwreg}, blue}], [{{color, riak_dt_lwwreg}, red}]} ->
-                    ok;
-                Else ->
-                    ct:fail("Got wrong old, and new values: ~p", [Else])
-            end
+        {lashup_kv_event, Ref, Key} ->
+            [{{color, riak_dt_lwwreg}, blue}] = lashup_kv:value(Key)
     after 5000 ->
         ct:fail("Nothing received")
     end,
-    ok.
+    lashup_kv:unsubscribe(Ref).
 
 remove_forgiving(_Config) ->
     Key = [x, y, z],

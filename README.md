@@ -83,7 +83,7 @@ The key-value store exposes a traditional API, and a subscription API. You can r
 The subscription API allows you to subscribe to key-value changes that match a specific pattern. We use standard `ets` match specs for this purpose. The match spec must return `true`. For example:
 `ets:fun2ms(fun({[node_metadata|_]}) -> true end)`. The match spec must be a 1-tuple, where the only member of the tuple is a key pattern.
 
-Then you can simply call `lashup_kv_events_helper:start_link(ets:fun2ms(fun({[node_metadata|_]}) -> true end))`. This will dump all existing keys matching the given pattern, and send you future keys matching the same pattern. In addition, Lashup deduplicates updates and only sends you new updates.
+Then you can simply call `lashup_kv:subscribe(ets:fun2ms(fun({[node_metadata|_]}) -> true end))`. This will dump all existing keys matching the given pattern, and send you future keys matching the same pattern. In addition, Lashup deduplicates updates and only sends you new updates.
 
 ### Multicast
 
