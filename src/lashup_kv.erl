@@ -15,7 +15,8 @@
   raw_value/1,
   descends/2,
   subscribe/1,
-  handle_event/2,
+  unsubscribe/1,
+  flush/2,
   first_key/0,
   next_key/1,
   read_lclock/1,
@@ -59,7 +60,8 @@
                     lclock => lclock()}.
 
 -record(state, {
-  mc_ref = erlang:error() :: reference()
+  mc_ref = erlang:error() :: reference(),
+  subscribers = #{} :: #{pid() => {ets:comp_match_spec(), reference()}}
 }).
 
 
@@ -124,25 +126,36 @@ descends(Key, VClock) ->
       false
   end.
 
--spec(subscribe(ets:match_spec()) -> {ok, ets:comp_match_spec(), [kv2map()]}).
+-spec(subscribe(ets:match_spec()) -> {ok, reference()}).
 subscribe(MatchSpec) ->
-  Begin = erlang:monotonic_time(),
-  ok = mnesia:wait_for_tables([?KV_TABLE], infinity),
-  mnesia:subscribe({table, ?KV_TABLE, detailed}),
-  MatchSpecKV2 = matchspec_kv2(MatchSpec),
-  Records = mnesia:dirty_select(?KV_TABLE, MatchSpecKV2),
-  prometheus_summary:observe(
-    lashup, kv_backend_read_seconds, [kv2],
-    erlang:monotonic_time() - Begin),
-  {ok, ets:match_spec_compile(MatchSpecKV2),
-   lists:map(fun kv2map/1, Records)}.
+  CompMatchSpec = ets:match_spec_compile(MatchSpec),
+  {ok, Ref} = gen_server:call(?MODULE, {subscribe, CompMatchSpec}),
+  lists:foreach(fun (Key) ->
+    self() ! {lashup_kv_event, Ref, Key}
+  end, keys(MatchSpec)),
+  {ok, Ref}.
 
--spec(handle_event(ets:comp_match_spec(), Event) -> false | kv2map()
-    when Event :: {write, ?KV_TABLE, kv(), [kv()], any()}).
-handle_event(Spec, {write, ?KV_TABLE, New, OldRecords, _ActivityId}) ->
-  case ets:match_spec_run([New], Spec) of
-    [New] -> kv2map(New, OldRecords);
-    [] -> false
+-spec(unsubscribe(Ref :: reference()) -> ok).
+unsubscribe(Ref) ->
+  ok = gen_server:call(?MODULE, {unsubscribe, Ref}),
+  flush_all(Ref).
+
+-spec(flush_all(reference()) -> ok).
+flush_all(Ref) ->
+  receive
+    {lashup_kv_event, Ref, _Key} ->
+      flush_all(Ref)
+  after 0 ->
+    ok
+  end.
+
+-spec(flush(Ref :: reference(), Key :: term()) -> ok).
+flush(Ref, Key) ->
+  receive
+    {lashup_kv_event, Ref, Key} ->
+      flush(Ref, Key)
+  after 0 ->
+    ok
   end.
 
 -spec(first_key() -> key() | '$end_of_table').
@@ -200,6 +213,12 @@ handle_call({op, Key, VClock, Op}, _From, State) ->
 handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
   Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
   {reply, Result, State};
+handle_call({subscribe, CompMatchSpec}, {Pid, _Tag}, State) ->
+  {Ref, State0} = handle_subscribe(Pid, CompMatchSpec, State),
+  {reply, {ok, Ref}, State0};
+handle_call({unsubscribe, _Ref}, {Pid, _Tag}, State) ->
+  State0 = handle_unsubscribe(Pid, State),
+  {reply, ok, State0};
 handle_call(_Request, _From, State) ->
   {reply, {error, unknown_request}, State}.
 
@@ -223,6 +242,9 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
       State1 = handle_lashup_gm_mc_event(Event, State),
       {noreply, State1}
   end;
+handle_info({'DOWN', _MonRef, process, Pid, _Info}, State) ->
+  State0 = handle_unsubscribe(Pid, State),
+  {noreply, State0};
 handle_info(Info, State) ->
   lager:debug("Info: ~p", [Info]),
   {noreply, State}.
@@ -361,7 +383,8 @@ handle_op(Key, Op, OldVClock, State) ->
       dumped = mnesia:dump_log(),
       propagate(NewKV),
       NewValue = riak_dt_map:value(NewKV#kv2.map),
-      {{ok, NewValue}, State};
+      State0 = notify_subscribers(Key, State),
+      {{ok, NewValue}, State0};
     {aborted, Reason} ->
       {{error, Reason}, State}
   after
@@ -511,29 +534,10 @@ handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := Remot
   prometheus_summary:observe(
     lashup, kv_handle_full_update_seconds, [],
     erlang:monotonic_time() - Begin),
-  State.
+  notify_subscribers(Key, State).
 
 increment_lclock(N) ->
   N + 1.
-
--spec(matchspec_kv2(ets:match_spec()) -> ets:match_spec()).
-matchspec_kv2({{Key}, Conditions, [true]}) ->
-  Match = #kv2{key = Key, map = '_', vclock = '_', lclock = '_'},
-  {Match, Conditions, ['$_']};
-matchspec_kv2(MatchSpec) ->
-  lists:map(fun matchspec_kv2/1, MatchSpec).
-
--spec(kv2map(kv()) -> kv2map()).
-kv2map(#kv2{key = Key, map = Map}) ->
-  #{key => Key, value => riak_dt_map:value(Map)}.
-
--spec(kv2map(kv(), [kv()]) -> kv2map()).
-kv2map(New, []) ->
-  kv2map(New);
-kv2map(New, [Old | _]) ->
-  Map = kv2map(New),
-  #{value := OldValue} = kv2map(Old),
-  Map#{old_value => OldValue}.
 
 -spec(op_write(tuple()) -> ok).
 op_write(Record) ->
@@ -541,6 +545,52 @@ op_write(Record) ->
   prometheus_summary:observe_duration(
     lashup, kv_backend_write_seconds, [Table],
     fun () -> mnesia:write(Record) end).
+
+%%%===================================================================
+%%% Pub/Sub functions
+%%%===================================================================
+
+-spec(handle_subscribe(pid(), ets:comp_match_spec(), state()) ->
+    {reference(), state()}).
+handle_subscribe(Pid, CompMatchSpec, #state{subscribers=Subs}=State) ->
+  MonRef = erlang:monitor(process, Pid),
+  Subs0 = Subs#{Pid => {CompMatchSpec, MonRef}},
+  {MonRef, State#state{subscribers=Subs0}}.
+
+-spec(handle_unsubscribe(pid(), state()) -> state()).
+handle_unsubscribe(Pid, #state{subscribers=Subs}=State) ->
+  case maps:find(Pid, Subs) of
+    {ok, {_CompMatchSpec, MonRef}} ->
+      _ = erlang:demonitor(MonRef, [flush]),
+      State#state{subscribers=maps:remove(Pid, Subs)};
+    error ->
+      State
+  end.
+
+-spec(notify_subscribers(key(), state()) -> state()).
+notify_subscribers(Key, #state{subscribers=Subs}=State) ->
+  mforeach(fun (Pid, {CompMatchSpec, Ref}) ->
+    case ets:match_spec_run([{Key}], CompMatchSpec) of
+      [true] -> Pid ! {lashup_kv_event, Ref, Key};
+      _Other -> ok
+    end
+  end, Subs),
+  State.
+
+-spec(mforeach(Fun :: fun((Key, Value) -> term()), Map) -> ok
+  when Map :: #{Key => Value} | maps:iterator(Key, Value),
+       Key :: term(), Value :: term()).
+mforeach(Fun, Map) when is_map(Map) ->
+  Iter = maps:iterator(Map),
+  mforeach(Fun, Iter);
+mforeach(Fun, Iter) ->
+  case maps:next(Iter) of
+    {Key, Value, Iter0} ->
+      _Result = Fun(Key, Value),
+      mforeach(Fun, Iter0);
+    none ->
+      ok
+  end.
 
 %%%===================================================================
 %%% Metrics functions
