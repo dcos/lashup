@@ -51,7 +51,7 @@ handle_cast(_Request, State) ->
 
 handle_info(do_probe, State) ->
   maybe_do_probe(State),
-  {noreply, State};
+  {noreply, State, hibernate};
 handle_info(_Info, State) ->
   {noreply, State}.
 

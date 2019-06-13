@@ -25,8 +25,8 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -export_type([key/0, lclock/0, kv2map/0, kv2raw/0]).
 
@@ -43,11 +43,13 @@
   vclock = riak_dt_vclock:fresh() :: riak_dt_vclock:vclock() | '_',
   lclock = 0 :: lclock() | '_'
 }).
+-type kv() :: #kv2{}.
 
 -record(nclock, {
   key :: node(),
   lclock :: lclock()
 }).
+-type nclock() :: #nclock{}.
 
 -type key() :: term().
 -type lclock() :: non_neg_integer(). % logical clock
@@ -61,8 +63,11 @@
 
 -record(state, {
   mc_ref = erlang:error() :: reference(),
-  subscribers = #{} :: #{pid() => {ets:comp_match_spec(), reference()}}
+  subscribers = #{} :: #{pid() => {ets:comp_match_spec(), reference()}},
+  gc_ref :: undefined | reference()
 }).
+-type state() :: #state{}.
+
 
 
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
@@ -204,12 +209,11 @@ init([]) ->
   init_db(),
   %% Maybe read_concurrency?
   {ok, Reference} = lashup_gm_mc_events:subscribe([?KV_TOPIC]),
-  State = #state{mc_ref = Reference},
-  {ok, State}.
+  {ok, #state{mc_ref = Reference}}.
 
 handle_call({op, Key, VClock, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, VClock, State),
-  {reply, Reply, State1};
+  {reply, Reply, start_gc_timer(State1)};
 handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
   Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
   {reply, Result, State};
@@ -225,7 +229,7 @@ handle_call(_Request, _From, State) ->
 %% A maybe update from the sync FSM
 handle_cast({maybe_update, Key, VClock, Map}, State0) ->
   State1 = handle_full_update(#{key => Key, vclock => VClock, map => Map}, State0),
-  {noreply, State1};
+  {noreply, start_gc_timer(State1)};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -237,36 +241,30 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
   case MsgQueueLen > MaxMsgQueueLen of
     true ->
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
-      {noreply, State};
+      {noreply, start_gc_timer(State)};
     false ->
       State1 = handle_lashup_gm_mc_event(Event, State),
-      {noreply, State1}
+      {noreply, start_gc_timer(State1)}
   end;
 handle_info({'DOWN', _MonRef, process, Pid, _Info}, State) ->
   State0 = handle_unsubscribe(Pid, State),
   {noreply, State0};
-handle_info(Info, State) ->
-  lager:debug("Info: ~p", [Info]),
+handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
+  {noreply, State#state{gc_ref = undefined}, hibernate};
+handle_info(_Info, State) ->
   {noreply, State}.
-
-terminate(Reason, State) ->
-  lager:debug("Terminating for reason: ~p, in state: ~p", [Reason, lager:pr(State, ?MODULE)]),
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
-
-%%%===================================================================
-%%% Internal types
-%%%===================================================================
-
--type kv() :: #kv2{}.
--type state() :: #state{}.
--type nclock() :: #nclock{}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(start_gc_timer(state()) -> state()).
+start_gc_timer(#state{gc_ref = undefined} = State) ->
+  Timeout = lashup_config:gc_timeout(),
+  TRef = erlang:start_timer(Timeout, self(), gc),
+  State#state{gc_ref = TRef};
+start_gc_timer(State) ->
+  State.
 
 -spec(max_message_queue_len() -> pos_integer()).
 max_message_queue_len() ->

@@ -10,8 +10,8 @@
 -export([start_link/0]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-    handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+    handle_cast/2, handle_info/2]).
 
 %% A node must be connected for 30 seconds before we attempt AAE
 -define(AAE_AFTER, 30000).
@@ -20,8 +20,10 @@
     hyparview_event_ref,
     route_event_ref,
     route_event_timer_ref = make_ref(),
-    active_view = []
+    active_view = [],
+    gc_ref :: undefined | reference()
 }).
+-type state() :: #state{}.
 
 
 -spec(start_link() ->
@@ -37,7 +39,9 @@ init([]) ->
     {ok, HyparviewEventsRef} = lashup_hyparview_events:subscribe(),
     {ok, RouteEventsRef} = lashup_gm_route_events:subscribe(),
     timer:send_after(0, refresh),
-    {ok, #state{hyparview_event_ref = HyparviewEventsRef, route_event_ref = RouteEventsRef}}.
+    {ok, #state{
+        hyparview_event_ref = HyparviewEventsRef,
+        route_event_ref = RouteEventsRef}}.
 
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
@@ -49,34 +53,39 @@ handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, 
     State0 = #state{hyparview_event_ref = EventRef}) ->
     State1 = State0#state{active_view = ActiveView},
     refresh(ActiveView),
-    {noreply, State1};
+    {noreply, start_gc_timer(State1)};
 handle_info({lashup_gm_route_events, #{ref := Ref}},
             State = #state{route_event_ref = Ref, route_event_timer_ref = TimerRef}) ->
     erlang:cancel_timer(TimerRef),
     TimerRef0 = start_route_event_timer(),
-    {noreply, State#state{route_event_timer_ref = TimerRef0}};
+    State0 = State#state{route_event_timer_ref = TimerRef0},
+    {noreply, start_gc_timer(State0)};
 handle_info({timeout, Ref, route_event}, State = #state{route_event_timer_ref = Ref}) ->
     State0 = handle_route_event(State),
-    {noreply, State0};
+    {noreply, start_gc_timer(State0)};
 handle_info(refresh, State = #state{active_view = ActiveView}) ->
     refresh(ActiveView),
     timer:send_after(lashup_config:aae_neighbor_check_interval(), refresh),
-    {noreply, State};
+    {noreply, start_gc_timer(State)};
 handle_info({start_child, Child}, State = #state{active_view = ActiveView}) ->
     maybe_start_child(Child, ActiveView),
-    {noreply, State};
+    {noreply, start_gc_timer(State)};
+handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
+    {noreply, State#state{gc_ref = undefined}, hibernate};
 handle_info(_Info, State) ->
     {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(start_gc_timer(state()) -> state()).
+start_gc_timer(#state{gc_ref = undefined} = State) ->
+    Timeout = lashup_config:gc_timeout(),
+    TRef = erlang:start_timer(Timeout, self(), gc),
+    State#state{gc_ref = TRef};
+start_gc_timer(State) ->
+    State.
 
 refresh(ActiveView) ->
     AllChildren = supervisor:which_children(lashup_kv_aae_sup),

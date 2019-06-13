@@ -10,12 +10,13 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
-  ping_times = #{} :: map()
+  ping_times = #{} :: map(),
+  gc_ref :: undefined | reference()
 }).
 -type state() :: #state{}.
 
@@ -77,10 +78,10 @@ handle_cast(_Request, State) ->
 
 handle_info(PingMessage = #{message := ping}, State) ->
   handle_ping(PingMessage, State),
-  {noreply, State};
+  {noreply, start_gc_timer(State)};
 handle_info(PongMessage = #{message := pong}, State) ->
   State1 = handle_pong(PongMessage, State),
-  {noreply, State1};
+  {noreply, start_gc_timer(State1)};
 handle_info({nodedown, NodeName}, State0 = #state{ping_times = PingTimes0}) ->
   PingTimes1 = maps:remove(NodeName, PingTimes0),
   State1 = State0#state{ping_times = PingTimes1},
@@ -88,18 +89,22 @@ handle_info({nodedown, NodeName}, State0 = #state{ping_times = PingTimes0}) ->
 handle_info({ping_failed, NRef}, State) ->
   State1 = handle_ping_failed(NRef, State),
   {noreply, State1};
+handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
+  {noreply, State#state{gc_ref = undefined}, hibernate};
 handle_info(_Info, State) ->
   {noreply, State}.
-
-terminate(_Reason, _State) ->
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+-spec(start_gc_timer(state()) -> state()).
+start_gc_timer(#state{gc_ref = undefined} = State) ->
+  Timeout = lashup_config:gc_timeout(),
+  TRef = erlang:start_timer(Timeout, self(), gc),
+  State#state{gc_ref = TRef};
+start_gc_timer(State) ->
+  State.
 
 -spec(do_ping(node(), state()) -> state()).
 do_ping(Node, State0 = #state{pings_in_flight = PIF, ping_times = PingTimes}) ->
