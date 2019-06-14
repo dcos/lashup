@@ -14,7 +14,8 @@
   subtract/2,
   shuffle_list/1,
   replace_file/2,
-  read_file/1
+  read_file/1,
+  hibernate/0
 ]).
 
 -export_type([window/0]).
@@ -152,3 +153,32 @@ read_file(FD, Acc) ->
     {error, _} = Err ->
       Err
   end.
+
+%%===================================================================
+
+% NOTE: The function stores its state in the process dictionary.
+-spec(hibernate() -> hibernate | infinity).
+hibernate() ->
+    Now = erlang:monotonic_time(millisecond),
+    Timeout = gc_timeout(),
+    case erlang:get(gc_at) of
+        undefined ->
+            erlang:put(gc_at, Now),
+            infinity;
+        Time when Now - Time >= Timeout ->
+            erlang:put(gc_at, Now),
+            hibernate;
+        _Time ->
+            infinity
+    end.
+
+-spec(gc_timeout() -> timeout()).
+gc_timeout() ->
+    case erlang:get(gc_timeout) of
+        undefined ->
+            Timeout = lashup_config:gc_timeout(),
+            erlang:put(gc_timeout, Timeout),
+            Timeout;
+        Timeout ->
+            Timeout
+    end.

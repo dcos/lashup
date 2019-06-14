@@ -44,8 +44,7 @@
   shuffle_interval = lashup_config:shuffle_interval() :: non_neg_integer(),
   join_interval = lashup_config:join_interval() :: non_neg_integer(),
   active_view_size = lashup_config:active_view_size() :: non_neg_integer(),
-  passive_view_size = lashup_config:passive_view_size() :: non_neg_integer(),
-  gc_ref :: undefined | reference()
+  passive_view_size = lashup_config:passive_view_size() :: non_neg_integer()
 }).
 
 -type state() :: state().
@@ -204,12 +203,10 @@ handle_info({tried_neighbor, Node}, State = #state{passive_view = PassiveView}) 
 handle_info(ping_rq, State) ->
   State1 = handle_ping_rq(State),
   State2 = check_state(State1),
-  {noreply, start_gc_timer(State2)};
+  {noreply, State2, lashup_utils:hibernate()};
 handle_info({maybe_disconnect, Node}, State) ->
   State1 = handle_maybe_disconnect(Node, State),
   {noreply, check_state(State1)};
-handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
-  {noreply, State#state{gc_ref = undefined}, hibernate};
 handle_info(Info, State) ->
   lager:debug("Received unknown info: ~p", [Info]),
   {noreply, State}.
@@ -217,14 +214,6 @@ handle_info(Info, State) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec(start_gc_timer(state()) -> state()).
-start_gc_timer(#state{gc_ref = undefined} = State) ->
-  Timeout = lashup_config:gc_timeout(),
-  TRef = erlang:start_timer(Timeout, self(), gc),
-  State#state{gc_ref = TRef};
-start_gc_timer(State) ->
-  State.
 
 %% Message Dispatch functions
 -spec(handle_message_cast(hyparview_message(), State :: state()) -> state()).

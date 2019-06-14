@@ -63,11 +63,9 @@
 
 -record(state, {
   mc_ref = erlang:error() :: reference(),
-  subscribers = #{} :: #{pid() => {ets:comp_match_spec(), reference()}},
-  gc_ref :: undefined | reference()
+  subscribers = #{} :: #{pid() => {ets:comp_match_spec(), reference()}}
 }).
 -type state() :: #state{}.
-
 
 
 -spec(request_op(Key :: key(), Op :: riak_dt_map:map_op()) ->
@@ -213,7 +211,7 @@ init([]) ->
 
 handle_call({op, Key, VClock, Op}, _From, State) ->
   {Reply, State1} = handle_op(Key, Op, VClock, State),
-  {reply, Reply, start_gc_timer(State1)};
+  {reply, Reply, State1, lashup_utils:hibernate()};
 handle_call({start_kv_sync_fsm, RemoteInitiatorNode, RemoteInitiatorPid}, _From, State) ->
   Result = lashup_kv_aae_sup:receive_aae(RemoteInitiatorNode, RemoteInitiatorPid),
   {reply, Result, State};
@@ -229,7 +227,7 @@ handle_call(_Request, _From, State) ->
 %% A maybe update from the sync FSM
 handle_cast({maybe_update, Key, VClock, Map}, State0) ->
   State1 = handle_full_update(#{key => Key, vclock => VClock, map => Map}, State0),
-  {noreply, start_gc_timer(State1)};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -241,30 +239,20 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
   case MsgQueueLen > MaxMsgQueueLen of
     true ->
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
-      {noreply, start_gc_timer(State)};
+      {noreply, State, lashup_utils:hibernate()};
     false ->
       State1 = handle_lashup_gm_mc_event(Event, State),
-      {noreply, start_gc_timer(State1)}
+      {noreply, State1, lashup_utils:hibernate()}
   end;
 handle_info({'DOWN', _MonRef, process, Pid, _Info}, State) ->
   State0 = handle_unsubscribe(Pid, State),
   {noreply, State0};
-handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
-  {noreply, State#state{gc_ref = undefined}, hibernate};
 handle_info(_Info, State) ->
   {noreply, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec(start_gc_timer(state()) -> state()).
-start_gc_timer(#state{gc_ref = undefined} = State) ->
-  Timeout = lashup_config:gc_timeout(),
-  TRef = erlang:start_timer(Timeout, self(), gc),
-  State#state{gc_ref = TRef};
-start_gc_timer(State) ->
-  State.
 
 -spec(max_message_queue_len() -> pos_integer()).
 max_message_queue_len() ->

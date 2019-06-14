@@ -23,9 +23,7 @@
 -export_type([topic/0, payload/0, multicast_packet/0]).
 
 -record(state, {
-    gc_ref :: undefined | reference()
 }).
--type state() :: #state{}.
 
 -type topic() :: atom().
 -type payload() :: term().
@@ -81,32 +79,22 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(#{type := multicast_packet} = MulticastPacket, State) ->
   handle_multicast_packet(MulticastPacket),
-  {noreply, start_gc_timer(State)};
+  {noreply, State, lashup_utils:hibernate()};
 handle_cast({do_multicast, Topic, Payload}, State) ->
   handle_do_original_multicast(Topic, Payload),
-  {noreply, start_gc_timer(State)};
+  {noreply, State, lashup_utils:hibernate()};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
 handle_info(#{type := multicast_packet} = MulticastPacket, State) ->
   handle_multicast_packet(MulticastPacket),
-  {noreply, start_gc_timer(State)};
-handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
-  {noreply, State#state{gc_ref = undefined}, hibernate};
+  {noreply, State, lashup_utils:hibernate()};
 handle_info(_Info, State) ->
   {noreply, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec(start_gc_timer(state()) -> state()).
-start_gc_timer(#state{gc_ref = undefined} = State) ->
-  Timeout = lashup_config:gc_timeout(),
-  TRef = erlang:start_timer(Timeout, self(), gc),
-  State#state{gc_ref = TRef};
-start_gc_timer(State) ->
-  State.
 
 -spec(handle_do_original_multicast(topic(), payload()) -> ok).
 handle_do_original_multicast(Topic, Payload) ->

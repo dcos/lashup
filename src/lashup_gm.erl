@@ -35,8 +35,7 @@
   epoch = erlang:error() :: non_neg_integer(),
   active_view = [],
   subscribers = [],
-  hyparview_event_ref :: reference(),
-  gc_ref :: undefined | reference()
+  hyparview_event_ref :: reference()
 }).
 -type state() :: #state{}.
 
@@ -75,13 +74,13 @@ init([]) ->
   {ok, State}.
 
 handle_call(gm, _From, State) ->
-  {reply, get_membership(), start_gc_timer(State)};
+  {reply, get_membership(), State, lashup_utils:hibernate()};
 handle_call({subscribe, Pid}, _From, State) ->
   {Reply, State1} = handle_subscribe(Pid, State),
   {reply, Reply, State1};
 handle_call(update_node, _From, State) ->
   State1 = update_node(timed_refresh, State),
-  {reply, 300000, start_gc_timer(State1)};
+  {reply, 300000, State1, lashup_utils:hibernate()};
 handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
   {reply, Reply, State};
@@ -91,17 +90,17 @@ handle_call(Request, _From, State) ->
 
 handle_cast({compressed, Data}, State) when is_binary(Data) ->
   Data1 = binary_to_term(Data),
-  handle_cast(Data1, start_gc_timer(State));
+  handle_cast(Data1, State);
 handle_cast({sync, Pid}, State) ->
   handle_sync(Pid, State),
   {noreply, State};
 handle_cast(#{message := remote_event, from := From, event := #{message := updated_node} = UpdatedNode}, State) ->
   %lager:debug("Received Updated Node: ~p", [UpdatedNode]),
   State1 = handle_updated_node(From, UpdatedNode, State),
-  {noreply, start_gc_timer(State1)};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_cast(update_node, State) ->
   State1 = update_node(internal_cast, State),
-  {noreply, start_gc_timer(State1)};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
@@ -112,29 +111,19 @@ handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_
 handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, active_view := ActiveView}},
   State0 = #state{hyparview_event_ref = EventRef}) ->
   State1 = handle_current_views(ActiveView, State0),
-  {noreply, start_gc_timer(State1)};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_info({nodedown, Node}, State) ->
   State1 = handle_nodedown(Node, State),
-  {noreply, start_gc_timer(State1)};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_info(trim_nodes, State) ->
   trim_nodes(State),
-  {noreply, start_gc_timer(State)};
-handle_info({timeout, GCRef, gc}, State = #state{gc_ref = GCRef}) ->
-  {noreply, State#state{gc_ref = undefined}, hibernate};
+  {noreply, State, lashup_utils:hibernate()};
 handle_info(_Info, State) ->
   {noreply, State}.
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-
--spec(start_gc_timer(state()) -> state()).
-start_gc_timer(#state{gc_ref = undefined} = State) ->
-  Timeout = lashup_config:gc_timeout(),
-  TRef = erlang:start_timer(Timeout, self(), gc),
-  State#state{gc_ref = TRef};
-start_gc_timer(State) ->
-  State.
 
 handle_sync(Pid, _State) ->
   lashup_gm_sync_worker:handle(Pid).
