@@ -49,6 +49,7 @@
   min_ping_ms/0,
   max_ping_ms/0,
   ping_log_base/0,
+  gc_timeout/0,
   aae_route_event_wait/0,
   update_contact_nodes/1
 ]).
@@ -185,6 +186,10 @@ ping_log_base() ->
 -spec(aae_route_event_wait() -> non_neg_integer()).
 aae_route_event_wait() ->
   get_env(aae_route_event_wait, 120000). % 2 min
+
+-spec(gc_timeout() -> timeout()).
+gc_timeout() ->
+  get_env(gc_timeout, 15000).
 
 get_env(Var, Default) ->
   application:get_env(lashup, Var, Default).

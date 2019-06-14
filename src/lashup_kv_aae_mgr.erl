@@ -10,8 +10,8 @@
 -export([start_link/0]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-    handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+    handle_cast/2, handle_info/2]).
 
 %% A node must be connected for 30 seconds before we attempt AAE
 -define(AAE_AFTER, 30000).
@@ -49,30 +49,25 @@ handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, 
     State0 = #state{hyparview_event_ref = EventRef}) ->
     State1 = State0#state{active_view = ActiveView},
     refresh(ActiveView),
-    {noreply, State1};
+    {noreply, State1, lashup_utils:hibernate()};
 handle_info({lashup_gm_route_events, #{ref := Ref}},
             State = #state{route_event_ref = Ref, route_event_timer_ref = TimerRef}) ->
     erlang:cancel_timer(TimerRef),
     TimerRef0 = start_route_event_timer(),
-    {noreply, State#state{route_event_timer_ref = TimerRef0}};
+    State0 = State#state{route_event_timer_ref = TimerRef0},
+    {noreply, State0, lashup_utils:hibernate()};
 handle_info({timeout, Ref, route_event}, State = #state{route_event_timer_ref = Ref}) ->
     State0 = handle_route_event(State),
-    {noreply, State0};
+    {noreply, State0, lashup_utils:hibernate()};
 handle_info(refresh, State = #state{active_view = ActiveView}) ->
     refresh(ActiveView),
     timer:send_after(lashup_config:aae_neighbor_check_interval(), refresh),
-    {noreply, State};
+    {noreply, State, lashup_utils:hibernate()};
 handle_info({start_child, Child}, State = #state{active_view = ActiveView}) ->
     maybe_start_child(Child, ActiveView),
-    {noreply, State};
+    {noreply, State, lashup_utils:hibernate()};
 handle_info(_Info, State) ->
     {noreply, State}.
-
-terminate(_Reason, _State) ->
-    ok.
-
-code_change(_OldVsn, State, _Extra) ->
-    {ok, State}.
 
 %%%===================================================================
 %%% Internal functions

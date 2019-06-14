@@ -22,8 +22,8 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -record(monitor, {
     monitor_ref :: reference(),
@@ -117,7 +117,8 @@ init([]) ->
   Window = lashup_utils:new_window(1000),
   reschedule_ping(60000),
 
-  State = #state{passive_view = lashup_config:contact_nodes(),
+  State = #state{
+    passive_view = lashup_config:contact_nodes(),
     fixed_seed = FixedSeed, join_window = Window},
   {ok, State}.
 
@@ -201,7 +202,8 @@ handle_info({tried_neighbor, Node}, State = #state{passive_view = PassiveView}) 
   {noreply, check_state(State1)};
 handle_info(ping_rq, State) ->
   State1 = handle_ping_rq(State),
-  {noreply, check_state(State1)};
+  State2 = check_state(State1),
+  {noreply, State2, lashup_utils:hibernate()};
 handle_info({maybe_disconnect, Node}, State) ->
   State1 = handle_maybe_disconnect(Node, State),
   {noreply, check_state(State1)};
@@ -209,18 +211,11 @@ handle_info(Info, State) ->
   lager:debug("Received unknown info: ~p", [Info]),
   {noreply, State}.
 
-terminate(Reason, State) ->
-  lager:error("Terminating with reason ~p, and state: ~p", [Reason, State]),
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
-
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-%% Message Dispatch functions
 
+%% Message Dispatch functions
 -spec(handle_message_cast(hyparview_message(), State :: state()) -> state()).
 handle_message_cast(JoinSuccess = #{message := join_success}, State) ->
   check_state(handle_join_success(JoinSuccess, State));

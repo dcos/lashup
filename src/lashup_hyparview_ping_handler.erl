@@ -10,8 +10,8 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -record(state, {
   pings_in_flight = orddict:new() :: orddict:orddict(Reference :: reference(), Node :: node()),
@@ -77,10 +77,10 @@ handle_cast(_Request, State) ->
 
 handle_info(PingMessage = #{message := ping}, State) ->
   handle_ping(PingMessage, State),
-  {noreply, State};
+  {noreply, State, lashup_utils:hibernate()};
 handle_info(PongMessage = #{message := pong}, State) ->
   State1 = handle_pong(PongMessage, State),
-  {noreply, State1};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_info({nodedown, NodeName}, State0 = #state{ping_times = PingTimes0}) ->
   PingTimes1 = maps:remove(NodeName, PingTimes0),
   State1 = State0#state{ping_times = PingTimes1},
@@ -90,12 +90,6 @@ handle_info({ping_failed, NRef}, State) ->
   {noreply, State1};
 handle_info(_Info, State) ->
   {noreply, State}.
-
-terminate(_Reason, _State) ->
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
 
 %%%===================================================================
 %%% Internal functions

@@ -15,8 +15,8 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -record(subscriber, {
     monitor_ref,
@@ -74,13 +74,13 @@ init([]) ->
   {ok, State}.
 
 handle_call(gm, _From, State) ->
-  {reply, get_membership(), State};
+  {reply, get_membership(), State, lashup_utils:hibernate()};
 handle_call({subscribe, Pid}, _From, State) ->
   {Reply, State1} = handle_subscribe(Pid, State),
   {reply, Reply, State1};
 handle_call(update_node, _From, State) ->
   State1 = update_node(timed_refresh, State),
-  {reply, 300000, State1};
+  {reply, 300000, State1, lashup_utils:hibernate()};
 handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
   {reply, Reply, State};
@@ -97,13 +97,11 @@ handle_cast({sync, Pid}, State) ->
 handle_cast(#{message := remote_event, from := From, event := #{message := updated_node} = UpdatedNode}, State) ->
   %lager:debug("Received Updated Node: ~p", [UpdatedNode]),
   State1 = handle_updated_node(From, UpdatedNode, State),
-  {noreply, State1};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_cast(update_node, State) ->
   State1 = update_node(internal_cast, State),
-  {noreply, State1};
-
-handle_cast(Request, State) ->
-  lager:debug("Received unknown cast: ~p", [Request]),
+  {noreply, State1, lashup_utils:hibernate()};
+handle_cast(_Request, State) ->
   {noreply, State}.
 
 handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_reference(MonitorRef) ->
@@ -113,23 +111,15 @@ handle_info(_Down = {'DOWN', MonitorRef, _Type, _Object, _Info}, State) when is_
 handle_info({lashup_hyparview_events, #{type := current_views, ref := EventRef, active_view := ActiveView}},
   State0 = #state{hyparview_event_ref = EventRef}) ->
   State1 = handle_current_views(ActiveView, State0),
-  {noreply, State1};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_info({nodedown, Node}, State) ->
   State1 = handle_nodedown(Node, State),
-  {noreply, State1};
+  {noreply, State1, lashup_utils:hibernate()};
 handle_info(trim_nodes, State) ->
   trim_nodes(State),
-  {noreply, State};
-handle_info(Info, State) ->
-  lager:debug("Unknown info: ~p", [Info]),
+  {noreply, State, lashup_utils:hibernate()};
+handle_info(_Info, State) ->
   {noreply, State}.
-
-terminate(Reason, State) ->
-  lager:debug("Lashup_GM terminated, because: ~p, in state: ~p", [Reason, State]),
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
 
 %%%===================================================================
 %%% Internal functions

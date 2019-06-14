@@ -17,12 +17,13 @@
 ]).
 
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2,
-  handle_info/2, terminate/2, code_change/3]).
+-export([init/1, handle_call/3,
+  handle_cast/2, handle_info/2]).
 
 -export_type([topic/0, payload/0, multicast_packet/0]).
 
--record(state, {}).
+-record(state, {
+}).
 
 -type topic() :: atom().
 -type payload() :: term().
@@ -78,24 +79,18 @@ handle_call(_Request, _From, State) ->
 
 handle_cast(#{type := multicast_packet} = MulticastPacket, State) ->
   handle_multicast_packet(MulticastPacket),
-  {noreply, State};
+  {noreply, State, lashup_utils:hibernate()};
 handle_cast({do_multicast, Topic, Payload}, State) ->
   handle_do_original_multicast(Topic, Payload),
-  {noreply, State};
+  {noreply, State, lashup_utils:hibernate()};
 handle_cast(_Request, State) ->
   {noreply, State}.
 
 handle_info(#{type := multicast_packet} = MulticastPacket, State) ->
   handle_multicast_packet(MulticastPacket),
-  {noreply, State};
+  {noreply, State, lashup_utils:hibernate()};
 handle_info(_Info, State) ->
   {noreply, State}.
-
-terminate(_Reason, _State) ->
-  ok.
-
-code_change(_OldVsn, State, _Extra) ->
-  {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
