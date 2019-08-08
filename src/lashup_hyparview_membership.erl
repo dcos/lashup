@@ -143,10 +143,10 @@ handle_cast({do_probe, Node}, State) ->
 handle_cast(Message = #{message := Type}, State) ->
   {message_queue_len, MsgQueueLen} =
     erlang:process_info(self(), message_queue_len),
-  prometheus_gauge:set(lashup, hyparview_message_queue, [], MsgQueueLen),
+  prometheus_gauge:set(lashup, hyparview_message_queue_length, [], MsgQueueLen),
   State1 =
     prometheus_summary:observe_duration(
-      lashup, hyparview_handle_cast_seconds, [Type],
+      lashup, hyparview_incoming_message_processing_seconds, [Type],
       fun () -> handle_message_cast(Message, State) end),
   {noreply, State1};
 handle_cast({recognize_pong, Pong}, State) ->
@@ -1003,7 +1003,7 @@ handle_recognize_pong(_Pong = #{now := _Now, receiving_node := Node},
 
 -spec(cast(node(), hyparview_message()) -> ok).
 cast(Node, #{message := Type} = Message) ->
-  prometheus_counter:inc(lashup, hyparview_cast_messages_total, [Type], 1),
+  prometheus_counter:inc(lashup, hyparview_outgoing_messages_total, [Type], 1),
   gen_server:cast({?MODULE, Node}, Message).
 
 -spec(abcast([node()], hyparview_message()) -> ok).
@@ -1028,20 +1028,20 @@ init_metrics() ->
   ]),
   prometheus_counter:new([
     {registry, lashup},
-    {name, hyparview_cast_messages_total},
+    {name, hyparview_outgoing_messages_total},
     {labels, [type]},
     {help, "Total number of HyParView messages sent to other nodes."}
   ]),
   prometheus_summary:new([
     {registry, lashup},
-    {name, hyparview_handle_cast_seconds},
+    {name, hyparview_incoming_message_processing_seconds},
     {labels, [type]},
     {duration_unit, seconds},
     {help, "The time spent processing HyParView messages from other nodes."}
   ]),
   prometheus_gauge:new([
     {registry, lashup},
-    {name, hyparview_message_queue},
+    {name, hyparview_message_queue_length},
     {help, "The length of HyParView process message box."}
   ]).
 

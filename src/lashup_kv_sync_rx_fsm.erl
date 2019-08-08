@@ -89,11 +89,13 @@ handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
 init_metrics() ->
     prometheus_counter:new([
         {registry, lashup},
-        {name, aae_rx_bytes_total},
-        {help, "Total number of AAE RX bytes received by node."}
+        {name, aae_rx_messages_total},
+        {help, "Total number of Active Anti-Entropy messages received "
+            "by this node."}
     ]),
     prometheus_counter:new([
         {registry, lashup},
-        {name, aae_rx_messages_total},
-        {help, "Total number of AAE RX messages received by node."}
+        {name, aae_rx_bytes_total},
+        {help, "Total size of Active Anti-Entropy messages in bytes "
+            "received by this node."}
     ]).
