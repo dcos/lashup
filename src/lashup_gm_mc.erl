@@ -77,9 +77,6 @@ init([]) ->
 handle_call(_Request, _From, State) ->
   {reply, ok, State}.
 
-handle_cast(#{type := multicast_packet} = MulticastPacket, State) ->
-  handle_multicast_packet(MulticastPacket),
-  {noreply, State, lashup_utils:hibernate()};
 handle_cast({do_multicast, Topic, Payload}, State) ->
   handle_do_original_multicast(Topic, Payload),
   {noreply, State, lashup_utils:hibernate()};
@@ -103,7 +100,7 @@ handle_do_original_multicast(Topic, Payload) ->
     original_multicast(Topic, Payload)
   after
     prometheus_summary:observe(
-      lashup, mc_do_multicast_seconds, [],
+      lashup, mc_multicast_seconds, [],
       erlang:monotonic_time() - Begin)
   end.
 
@@ -166,8 +163,8 @@ do_original_cast(Node, Packet) ->
 -spec(handle_multicast_packet(multicast_packet()) -> ok).
 handle_multicast_packet(MulticastPacket) ->
   Size = erlang:external_size(MulticastPacket),
-  prometheus_counter:inc(lashup, mc_receive_messages_total, [], 1),
-  prometheus_counter:inc(lashup, mc_receive_bytes_total, [], Size),
+  prometheus_counter:inc(lashup, mc_incoming_packets_total, [], 1),
+  prometheus_counter:inc(lashup, mc_incoming_bytes_total, [], Size),
   % 1. Process the packet, and forward it on
   maybe_forward_packet(MulticastPacket),
   % 2. Fan it out to lashup_gm_mc_events
@@ -204,18 +201,13 @@ forward_packet(MulticastPacket, Tree) ->
 
 bsend(MulticastPacket, Children) ->
   lists:foreach(fun (Child) ->
-    Begin = erlang:monotonic_time(),
-    try erlang:send({?MODULE, Child}, MulticastPacket, [noconnect]) of
+    case erlang:send({?MODULE, Child}, MulticastPacket, [noconnect]) of
       noconnect ->
         lager:warning("Dropping packet due to stale tree");
       _Result ->
         prometheus_counter:inc(
-          lashup, mc_send_bytes_total, [],
+          lashup, mc_outgoing_bytes_total, [],
           erlang:external_size(MulticastPacket))
-    after
-      prometheus_summary:observe(
-        lashup, mc_send_packets_seconds, [],
-        erlang:monotonic_time() - Begin)
     end
   end, Children).
 
@@ -227,28 +219,22 @@ bsend(MulticastPacket, Children) ->
 init_metrics() ->
   prometheus_summary:new([
     {registry, lashup},
-    {name, mc_do_multicast_seconds},
+    {name, mc_multicast_seconds},
     {duration_unit, seconds},
-    {help, "The time spent processing multicast packets."}
-  ]),
-  prometheus_summary:new([
-    {registry, lashup},
-    {name, mc_send_packets_seconds},
-    {duration_unit, seconds},
-    {help, "The time spent sending multicast packets."}
+    {help, "The time spent sending out multicast packets."}
   ]),
   prometheus_counter:new([
     {registry, lashup},
-    {name, mc_send_bytes_total},
+    {name, mc_outgoing_bytes_total},
     {help, "Total number of multicast packets sent in bytes."}
   ]),
   prometheus_counter:new([
     {registry, lashup},
-    {name, mc_receive_bytes_total},
+    {name, mc_incoming_bytes_total},
     {help, "Total number of bytes multicast packets received in bytes."}
   ]),
   prometheus_counter:new([
     {registry, lashup},
-    {name, mc_receive_messages_total},
+    {name, mc_incoming_packets_total},
     {help, "Total number of bytes multicast packets received."}
   ]).

@@ -153,11 +153,13 @@ send(RemotePID, Message) ->
 init_metrics() ->
     prometheus_counter:new([
         {registry, lashup},
-        {name, aae_tx_bytes_total},
-        {help, "Total number of AAE TX bytes sent by node."}
+        {name, aae_tx_messages_total},
+        {help, "Total number of Active Anti-Entropy messages sent by "
+            "this node."}
     ]),
     prometheus_counter:new([
         {registry, lashup},
-        {name, aae_tx_messages_total},
-        {help, "Total number of AAE TX messages sent by node."}
+        {name, aae_tx_bytes_total},
+        {help, "Total size of Active Anti-Entropy messages in bytes "
+            "sent by this node."}
     ]).
