@@ -76,24 +76,29 @@ request_op(Key, Op) ->
 -spec(request_op(Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()) ->
   {ok, riak_dt_map:value()} | {error, Reason :: term()}).
 request_op(Key, VClock, Op) ->
-  Begin = erlang:monotonic_time(),
   Pid = whereis(?MODULE),
   Args = {op, Key, VClock, Op},
-  MaxMsgQueueLen = max_message_queue_len(),
   try erlang:process_info(Pid, message_queue_len) of
     {message_queue_len, MsgQueueLen} ->
-      prometheus_gauge:set(lashup, kv_message_queue, [], MsgQueueLen),
-      case MsgQueueLen > MaxMsgQueueLen of
-        false ->
-          gen_server:call(Pid, Args, infinity);
-        true -> {error, overflow}
-      end
+      maybe_request_op_call(Pid, MsgQueueLen, Args)
   catch error:badarg ->
     exit({noproc, {gen_server, call, [?MODULE, Args]}})
-  after
-    prometheus_summary:observe(
-      lashup, kv_request_op_seconds, [],
-      erlang:monotonic_time() - Begin)
+  end.
+
+-spec(maybe_request_op_call(Pid :: pid(), MsgQueueLen :: integer(),
+  {op, Key :: key(), Context :: riak_dt_vclock:vclock() | undefined, Op :: riak_dt_map:map_op()}) ->
+  {ok, riak_dt_map:value()} | {error, Reason :: term()}).
+maybe_request_op_call(Pid, MsgQueueLen, Args) ->
+  prometheus_gauge:set(lashup, kv_message_queue_length, [], MsgQueueLen),
+  MaxMsgQueueLen = max_message_queue_len(),
+  case MsgQueueLen > MaxMsgQueueLen of
+    false ->
+      prometheus_summary:observe_duration(
+        lashup, kv_op_with_latency_seconds, [],
+        fun () -> gen_server:call(Pid, Args, infinity) end);
+    true ->
+      prometheus_counter:inc(lashup, kv_message_queue_overflows_total, [], 1),
+      {error, overflow}
   end.
 
 -spec(keys(ets:match_spec()) -> [key()]).
@@ -235,10 +240,11 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
   MaxMsgQueueLen = max_message_queue_len(),
   {message_queue_len, MsgQueueLen} =
     erlang:process_info(self(), message_queue_len),
-  prometheus_gauge:set(lashup, kv_message_queue, [], MsgQueueLen),
+  prometheus_gauge:set(lashup, kv_message_queue_length, [], MsgQueueLen),
   case MsgQueueLen > MaxMsgQueueLen of
     true ->
       lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
+      prometheus_counter:inc(lashup, kv_message_queue_overflows_total, [], 1),
       {noreply, State, lashup_utils:hibernate()};
     false ->
       State1 = handle_lashup_gm_mc_event(Event, State),
@@ -346,7 +352,7 @@ prepare_kv(Key, Map0, VClock0, Op) ->
   Map2 =
     case
       prometheus_summary:observe_duration(
-        lashup, kv_crdt_seconds, [],
+        lashup, kv_crdt_op_seconds, [],
         fun () -> riak_dt_map:update(Op, Dot, Map0) end)
     of
       {ok, Map1} -> Map1;
@@ -375,7 +381,7 @@ handle_op(Key, Op, OldVClock, State) ->
       {{error, Reason}, State}
   after
     prometheus_summary:observe(
-      lashup, kv_handle_op_seconds, [],
+      lashup, kv_op_seconds, [],
       erlang:monotonic_time() - Begin)
   end.
 
@@ -503,7 +509,7 @@ should_full_update(LocalKV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock
 create_full_update(KV = #kv2{vclock = LocalVClock}, RemoteMap, RemoteVClock) ->
   Map1 =
     prometheus_summary:observe_duration(
-      lashup, kv_crdt_seconds, [],
+      lashup, kv_crdt_op_seconds, [],
       fun () -> riak_dt_map:merge(RemoteMap, KV#kv2.map) end),
   VClock1 = riak_dt_vclock:merge([LocalVClock, RemoteVClock]),
   LClock0 = get_lclock(node()),
@@ -518,7 +524,7 @@ handle_full_update(_Payload = #{key := Key, vclock := RemoteVClock, map := Remot
   Fun = mk_full_update_fun(Key, RemoteMap, RemoteVClock),
   {atomic, _} = mnesia:sync_transaction(Fun),
   prometheus_summary:observe(
-    lashup, kv_handle_full_update_seconds, [],
+    lashup, kv_full_update_seconds, [],
     erlang:monotonic_time() - Begin),
   notify_subscribers(Key, State).
 
@@ -584,43 +590,50 @@ mforeach(Fun, Iter) ->
 
 -spec(init_metrics() -> ok).
 init_metrics() ->
-  init_kv_metrics(),
   init_op_metrics(),
+  init_kv_metrics(),
   init_backend_metrics().
-
--spec(init_kv_metrics() -> ok).
-init_kv_metrics() ->
-  prometheus_summary:new([
-    {registry, lashup},
-    {name, kv_handle_op_seconds},
-    {duration_unit, seconds},
-    {help, "The time spent processing KV operations."}
-  ]),
-  prometheus_summary:new([
-    {registry, lashup},
-    {name, kv_handle_full_update_seconds},
-    {duration_unit, seconds},
-    {help, "The time spent processing KV full updates."}
-  ]),
-  prometheus_gauge:new([
-    {registry, lashup},
-    {name, kv_message_queue},
-    {help, "The length of KV process message box."}
-  ]),
-  prometheus_summary:new([
-    {registry, lashup},
-    {name, kv_crdt_seconds},
-    {duration_unit, seconds},
-    {help, "The time spent merging/updating CRDT in KV process."}
-  ]).
 
 -spec(init_op_metrics() -> ok).
 init_op_metrics() ->
   prometheus_summary:new([
     {registry, lashup},
-    {name, kv_request_op_seconds},
+    {name, kv_op_seconds},
     {duration_unit, seconds},
-    {help, "The time spent waiting for processing KV operations."}
+    {help, "The time spent processing KV operations."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_op_with_latency_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent waiting for KV operation execution and "
+        "actually executing it."}
+  ]),
+  prometheus_counter:new([
+    {registry, lashup},
+    {name, kv_message_queue_overflows_total},
+    {labels, [type]},
+    {help, "Total number of messages dropped due to queue overflows."}
+  ]).
+
+-spec(init_kv_metrics() -> ok).
+init_kv_metrics() ->
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_full_update_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent processing KV full updates."}
+  ]),
+  prometheus_gauge:new([
+    {registry, lashup},
+    {name, kv_message_queue_length},
+    {help, "The length of KV process message box."}
+  ]),
+  prometheus_summary:new([
+    {registry, lashup},
+    {name, kv_crdt_op_seconds},
+    {duration_unit, seconds},
+    {help, "The time spent merging/updating CRDT in KV process."}
   ]).
 
 -spec(init_backend_metrics() -> ok).
