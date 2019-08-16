@@ -247,7 +247,7 @@ handle_updated_node(From, UpdatedNode = #{node := Node}, State) ->
   prometheus_counter:inc(lashup, gm_updates_total, [], 1),
   {message_queue_len, MsgQueueLen} =
     erlang:process_info(self(), message_queue_len),
-  prometheus_gauge:set(lashup, gm_message_queue, [], MsgQueueLen),
+  prometheus_gauge:set(lashup, gm_message_queue_length, [], MsgQueueLen),
   case ets:lookup(members, Node) of
     [] ->
       %% Brand new, store it
@@ -470,6 +470,6 @@ init_metrics() ->
   ]),
   prometheus_gauge:new([
     {registry, lashup},
-    {name, gm_message_queue},
+    {name, gm_message_queue_length},
     {help, "The length of global membership process message box."}
   ]).
