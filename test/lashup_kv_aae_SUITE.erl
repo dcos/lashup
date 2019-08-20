@@ -1,7 +1,5 @@
 -module(lashup_kv_aae_SUITE).
 
--compile({parse_transform, lager_transform}).
-
 -include_lib("common_test/include/ct.hrl").
 
 -export([

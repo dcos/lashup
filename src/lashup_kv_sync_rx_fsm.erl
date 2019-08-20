@@ -3,6 +3,8 @@
 
 -behaviour(gen_statem).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([
     start_link/2,
@@ -35,7 +37,7 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
     {ok, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
-    lager:warning("KV AAE RX FSM terminated (~p): ~p", [State, Reason]).
+    ?LOG_WARNING("KV AAE RX FSM terminated (~p): ~p", [State, Reason]).
 
 handle(info, Message = #{from := RemotePID}, StateData = #state{remote_pid = RemotePID}) ->
     Size = erlang:external_size(Message),
@@ -51,7 +53,7 @@ rx_sync(info, #{key := Key, from := RemotePID, message := keydata, vclock := VCl
         StateData = #state{remote_pid = RemotePID}) ->
     case lashup_kv:descends(Key, VClock) of
         false ->
-            lager:debug("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
+            ?LOG_DEBUG("Synchronizing key ~p from ~p", [Key, node(RemotePID)]),
             request_key(Key, StateData);
         true ->
             ok
@@ -78,7 +80,7 @@ sync_kv(Key, VClock, Map) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
     {stop, normal};
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
-    lager:warning("Lashup AAE TX Process disconnected: ~p", [Reason]),
+    ?LOG_WARNING("Lashup AAE TX Process disconnected: ~p", [Reason]),
     {stop, normal}.
 
 %%%===================================================================

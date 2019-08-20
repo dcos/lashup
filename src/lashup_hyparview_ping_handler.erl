@@ -2,6 +2,8 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([
   start_link/0,
@@ -108,7 +110,7 @@ do_ping(Node, State0 = #state{pings_in_flight = PIF, ping_times = PingTimes}) ->
       State0#state{pings_in_flight = PIF2};
     %% Treat ping as failed
     _ ->
-      lager:info("Ping to node ~p failed, because erlang:send failed", [Node]),
+      ?LOG_INFO("Ping to node ~p failed, because erlang:send failed", [Node]),
       timer:cancel(TimerRef),
       lashup_hyparview_membership:ping_failed(Node),
       PingTimes2 = maps:remove(Node, PingTimes),
@@ -119,7 +121,7 @@ do_ping(Node, State0 = #state{pings_in_flight = PIF, ping_times = PingTimes}) ->
 handle_ping_failed(Ref, State = #state{ping_times = PingTimes, pings_in_flight = PIF}) ->
   case orddict:find(Ref, PIF) of
     {ok, {RTT, Node}} ->
-      lager:info("Didn't receive Pong from Node: ~p in time: ~p", [Node, RTT]),
+      ?LOG_INFO("Didn't receive Pong from Node: ~p in time: ~p", [Node, RTT]),
       lashup_hyparview_membership:ping_failed(Node),
       PIF2 = orddict:erase(Ref, PIF),
       PingTimes2 = maps:remove(Node, PingTimes),

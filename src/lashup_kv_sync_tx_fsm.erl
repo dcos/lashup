@@ -14,6 +14,7 @@
 %% Internal APIs
 -export([init/1, code_change/4, terminate/3, callback_mode/0]).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -record(state, {node, monitor_ref, remote_pid, lclock, maxclock}).
@@ -83,13 +84,13 @@ tx_sync(cast, {sync, Key}, StateData = #state{remote_pid = RemotePID, lclock = L
     {keep_state, StateData#state{maxclock = MaxClock1}}.
 
 idle(info, do_sync, StateData = #state{node = RemoteNode}) ->
-    lager:info("Starting tx sync with ~p", [RemoteNode]),
+    ?LOG_INFO("Starting tx sync with ~p", [RemoteNode]),
     {next_state, tx_sync, StateData, [{next_event, internal, start_sync}]};
 
 idle(internal, reschedule_sync, #state{node = RemoteNode}) ->
     BaseAAEInterval = lashup_config:aae_interval(),
     NextSync = trunc(BaseAAEInterval * (1 + rand:uniform())),
-    lager:info("Scheduling sync with ~p in ~p milliseconds", [RemoteNode, NextSync]),
+    ?LOG_INFO("Scheduling sync with ~p in ~p milliseconds", [RemoteNode, NextSync]),
     timer:send_after(NextSync, do_sync),
     keep_state_and_data;
 
@@ -100,7 +101,7 @@ code_change(_OldVsn, OldState, OldData, _Extra) ->
     {ok, OldState, OldData}.
 
 terminate(Reason, State, _Data) ->
-    lager:warning("KV AAE TX FSMs terminated (~p): ~p", [State, Reason]).
+    ?LOG_WARNING("KV AAE TX FSMs terminated (~p): ~p", [State, Reason]).
 
 finish_sync(RemotePID) ->
     erlang:garbage_collect(self()),
@@ -133,7 +134,7 @@ maybe_fetch_next_key(Key, _, LClock) ->
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, noconnection}) ->
     {stop, normal};
 handle_disconnect({'DOWN', _MonitorRef, _Type, _Object, Reason}) ->
-    lager:warning("Lashup AAE RX Process disconnected: ~p", [Reason]),
+    ?LOG_WARNING("Lashup AAE RX Process disconnected: ~p", [Reason]),
     {stop, normal}.
 
 send(RemotePID, Message) ->

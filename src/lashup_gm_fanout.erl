@@ -1,6 +1,7 @@
 -module(lashup_gm_fanout).
 -author("sdhillon").
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("lashup.hrl").
 
@@ -50,7 +51,7 @@ init(State = #state{receiver = Receiver, node = Node}) when node() == node(Recei
       State1 = State#state{receiver_mon = ReceiverMon, parent_mon = ParentMon, parent = Parent},
       event_loop(State1);
     Else ->
-      lager:debug("Lashup GM Fanout unable to subscribe: ~p", [Else]),
+      ?LOG_DEBUG("Lashup GM Fanout unable to subscribe: ~p", [Else]),
       exit({unable_to_subscribe, Else})
   end.
 

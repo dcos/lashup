@@ -62,7 +62,7 @@ masters(Nodes) ->
     element(1, lists:split(length(?MASTERS), Nodes)).
 
 agents(Nodes) ->
-	element(2, lists:split(length(?MASTERS), Nodes)).
+    element(2, lists:split(length(?MASTERS), Nodes)).
 
 start_nodes(Nodes) ->
     Opts = [{monitor_master, true}, {erl_flags, "-connect_all false"}],
@@ -204,7 +204,7 @@ wait_for_convergence(_TotalTime, _Interval, Nodes, _Size) ->
                       orddict:update_counter(Node, 1, Acc)
                   end, InitDict, ActiveViews),
     Unconverged = orddict:filter(fun(_Key, Value) ->
-                      Value == 0 
+                      Value == 0
                   end, DictCounted),
     ct:pal("Unconverged: ~p", [Unconverged]),
     ct:fail(never_converged).
