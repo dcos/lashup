@@ -1,14 +1,10 @@
 {"1.1.0",
-[{<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.9">>},1},
- {<<"lager">>,{pkg,<<"lager">>,<<"3.6.5">>},0},
- {<<"prometheus">>,{pkg,<<"prometheus">>,<<"4.2.0">>},0},
+[{<<"prometheus">>,{pkg,<<"prometheus">>,<<"4.2.0">>},0},
  {<<"riak_dt">>,
   {git,"https://github.com/dcos/riak_dt.git",
        {ref,"b5c3fa058f9e56ec14f33b68d5d07ea6fbb97538"}},
   0}]}.
 [
 {pkg_hash,[
- {<<"goldrush">>, <<"F06E5D5F1277DA5C413E84D5A2924174182FB108DABB39D5EC548B27424CD106">>},
- {<<"lager">>, <<"831910109F3FCB503DEBF658CA0538836B348C58BFBF349A6D48228096CE9040">>},
  {<<"prometheus">>, <<"06C58BFDFE28D3168B926DA614CB9A6D39593DEEBDE648A5480E32DFA3C370E9">>}]}
 ].

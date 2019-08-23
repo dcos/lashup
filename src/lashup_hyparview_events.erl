@@ -2,6 +2,8 @@
 -author("sdhillon").
 -behaviour(gen_event).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([
   start_link/0,
@@ -77,7 +79,7 @@ handle_call(_Request, State) ->
   {ok, Reply, State}.
 
 handle_info(Info, State) ->
-  lager:warning("Received unknown info: ~p, in state: ~p", [Info, State]),
+  ?LOG_WARNING("Received unknown info: ~p, in state: ~p", [Info, State]),
   {ok, State}.
 
 terminate(_Arg, _State) ->

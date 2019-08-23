@@ -6,6 +6,8 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([start_link/0]).
 
@@ -96,14 +98,14 @@ handle_route_event(State) ->
     case lashup_gm_route:get_tree(node()) of
         {tree, Tree} ->
             UnreachableNodes = lashup_gm_route:unreachable_nodes(Tree),
-            lager:info("Purging nclock for nodes: ~p", [UnreachableNodes]),
+            ?LOG_INFO("Purging nclock for nodes: ~p", [UnreachableNodes]),
             lists:foreach(fun(Node) ->
                               mnesia:dirty_delete(nclock, Node)
                           end,
                           UnreachableNodes),
             State;
          Error ->
-            lager:warning("get_tree() call failed ~p", [Error]),
+            ?LOG_WARNING("get_tree() call failed ~p", [Error]),
             TimerRef = start_route_event_timer(),
             State#state{route_event_timer_ref = TimerRef}
     end.

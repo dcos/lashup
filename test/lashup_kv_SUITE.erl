@@ -1,7 +1,5 @@
 -module(lashup_kv_SUITE).
 
--compile({parse_transform, lager_transform}).
-
 -include_lib("common_test/include/ct.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
@@ -47,22 +45,22 @@ end_per_testcase(_, Config) ->
 
 fetch_keys(_Config) ->
     Key1 = [a,b,c],
-    {ok, _} = lashup_kv:request_op(Key1, {update, 
-                  [{update, 
-                      {flag, riak_dt_lwwreg}, 
+    {ok, _} = lashup_kv:request_op(Key1, {update,
+                  [{update,
+                      {flag, riak_dt_lwwreg},
                       {assign, true, erlang:system_time(nano_seconds)}
                   }]
               }),
     Key2 = [a,b,d],
-    {ok, _} = lashup_kv:request_op(Key2, {update, 
-                  [{update, 
-                      {flag, riak_dt_lwwreg}, 
+    {ok, _} = lashup_kv:request_op(Key2, {update,
+                  [{update,
+                      {flag, riak_dt_lwwreg},
                       {assign, true, erlang:system_time(nano_seconds)}
                   }]
               }),
     Key3 = [x,y,z],
-    {ok, _} = lashup_kv:request_op(Key3, {update, 
-                  [{update, 
+    {ok, _} = lashup_kv:request_op(Key3, {update,
+                  [{update,
                       {flag, riak_dt_lwwreg},
                       {assign, true, erlang:system_time(nano_seconds)}
                   }]
@@ -74,9 +72,9 @@ fetch_keys(_Config) ->
     ok.
 
 kv_subscribe(_Config) ->
-    {ok, _} = lashup_kv:request_op(flag, {update, 
-                  [{update, 
-                      {color, riak_dt_lwwreg}, 
+    {ok, _} = lashup_kv:request_op(flag, {update,
+                  [{update,
+                      {color, riak_dt_lwwreg},
                       {assign, red, erlang:system_time(nano_seconds)}
                   }]
               }),
@@ -87,9 +85,9 @@ kv_subscribe(_Config) ->
     after 5000 ->
         ct:fail("Nothing received")
     end,
-    {ok, _} = lashup_kv:request_op(flag, {update, 
-                  [{update, 
-                      {color, riak_dt_lwwreg}, 
+    {ok, _} = lashup_kv:request_op(flag, {update,
+                  [{update,
+                      {color, riak_dt_lwwreg},
                       {assign, blue, erlang:system_time(nano_seconds)}
                   }]
               }),

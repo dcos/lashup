@@ -13,7 +13,6 @@
 all() -> [benchmark, basic_events, busy_wait_events].
 
 init_per_testcase(_TestCase, Config) ->
-    {ok, _} = application:ensure_all_started(lager),
     ok = application:start(prometheus),
     ok = lashup_gm_route:init_metrics(),
     {ok, _} = lashup_gm_route:start_link(),

@@ -18,6 +18,8 @@
 
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 
 %% gen_server callbacks
@@ -100,7 +102,7 @@ maybe_do_probe(_State) ->
     {tree, Tree} ->
       do_probe(Tree);
     false ->
-      lager:warning("Lashup GM Probe unable to get LSA Tree"),
+      ?LOG_WARNING("Lashup GM Probe unable to get LSA Tree"),
       schedule_next_probe(),
       ok
   end.

@@ -12,6 +12,7 @@
 
 -compile(inline).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 -behaviour(gen_statem).
@@ -288,7 +289,7 @@ handle_event(cast, {delete_node, Node}, _StateName, StateData0) ->
   {next_state, dirty_tree, StateData1, [{next_event, internal, maybe_advertise_state}]}.
 
 terminate(Reason, State, Data = #state{}) ->
-  lager:warning("Terminating in State: ~p, due to reason: ~p, with data: ~p", [State, Reason, Data]),
+  ?LOG_WARNING("Terminating in State: ~p, due to reason: ~p, with data: ~p", [State, Reason, Data]),
   ok.
 
 code_change(_OldVsn, OldState, OldData, _Extra) ->
@@ -462,6 +463,7 @@ proper_test_() ->
   }.
 
 setup() ->
+  ok = logger:remove_handler(default),
   ok = application:start(prometheus),
   init_metrics().
 

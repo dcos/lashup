@@ -2,6 +2,7 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
 -include("lashup.hrl").
 
 -ifdef(TEST).
@@ -161,7 +162,7 @@ handle_cast({recommend_neighbor, Node}, State) ->
   handle_recommend_neighbor(Node, State),
   {noreply, State};
 handle_cast(Request, State) ->
-  lager:debug("Received unknown cast: ~p", [Request]),
+  ?LOG_DEBUG("Received unknown cast: ~p", [Request]),
   {noreply, check_state(State)}.
 
 %% It's likely just that someone connected to us, and that's okay
@@ -179,7 +180,7 @@ handle_info(maybe_neighbor, State0) when length(State0#state.active_view) >= Sta
   State1 = State0#state{unfilled_active_set_count = 0},
   {noreply, check_state(State1)};
 handle_info(maybe_neighbor, State) ->
-  lager:debug("Maybe neighbor triggered"),
+  ?LOG_DEBUG("Maybe neighbor triggered"),
   State1 = maybe_neighbor(State),
   push_state(State1),
   {noreply, check_state(State1)};
@@ -187,7 +188,7 @@ handle_info(maybe_neighbor, State) ->
 handle_info(join_failed, State = #state{active_view = ActiveView}) when length(ActiveView) > 0 ->
   {noreply, State};
 handle_info(join_failed, State) ->
-  lager:debug("Attempt to join timed out, rescheduling"),
+  ?LOG_DEBUG("Attempt to join timed out, rescheduling"),
   reschedule_join(),
   {noreply, State};
 handle_info(try_join, State = #state{joined = true}) ->
@@ -208,7 +209,7 @@ handle_info({maybe_disconnect, Node}, State) ->
   State1 = handle_maybe_disconnect(Node, State),
   {noreply, check_state(State1)};
 handle_info(Info, State) ->
-  lager:debug("Received unknown info: ~p", [Info]),
+  ?LOG_DEBUG("Received unknown info: ~p", [Info]),
   {noreply, State}.
 
 %%%===================================================================
@@ -244,7 +245,7 @@ handle_message_cast(Shuffle = #{message := shuffle}, State) ->
 handle_message_cast(ShuffleReply = #{message := shuffle_reply}, State) ->
   check_state(handle_shuffle_reply(ShuffleReply, State));
 handle_message_cast(UnknownMessage, State) ->
-  lager:warning("Received unknown lashup message: ~p", [UnknownMessage]),
+  ?LOG_WARNING("Received unknown lashup message: ~p", [UnknownMessage]),
   State.
 
 %% RESCHEDULING Functions
@@ -351,7 +352,7 @@ trim_ordset_to(Ordset, _Size, DroppedItems) ->
 -spec(handle_join(Node :: node(), State :: state(), Ref :: reference()) -> state()).
 handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveView, active_view_size = AVS}, Ref)
   when Node =/= node() ->
-  lager:debug("Saw join from ~p", [Node]),
+  ?LOG_DEBUG("Saw join from ~p", [Node]),
   State1 =
   case lashup_utils:count_ticks(JoinWindow) of
     %% Limit it to 25 joins/sec if the active view is full
@@ -362,7 +363,7 @@ handle_join(Node, State = #state{join_window = JoinWindow, active_view = ActiveV
       really_handle_join(Node, State, Ref);
     %% Else, drop it
     WindowSize ->
-      lager:warning("Throttling joins, window size: ~p, active view size: ~p", [WindowSize, length(ActiveView)]),
+      ?LOG_WARNING("Throttling joins, window size: ~p, active view size: ~p", [WindowSize, length(ActiveView)]),
       deny_join(State, Node, Ref),
       State
   end,
@@ -432,7 +433,7 @@ trim_active_view(Size, State = #state{active_view = ActiveView}) ->
     [] ->
       ok;
     _ ->
-      lager:debug("Removing ~p from active view", [DroppedNodes])
+      ?LOG_DEBUG("Removing ~p from active view", [DroppedNodes])
   end,
   State1.
 
@@ -453,7 +454,7 @@ try_add_node_to_active_view(Node, State = #state{active_view_size = ActiveViewSi
       State2 = State1#state{active_view = ActiveView2, passive_view = PassiveView2, monitors = Monitors2},
       {ok, State2};
     _ ->
-      lager:warning("Received join from node ~p, but could not connect back to it", [Node]),
+      ?LOG_WARNING("Received join from node ~p, but could not connect back to it", [Node]),
       {error, State}
   end;
 
@@ -499,7 +500,7 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, node := Node, seen := Seen},
   ForwardJoin1 = ForwardJoin#{ttl => TTL - 1, sender := node(), seen := Seen1},
   case ordsets:subtract(ActiveView, Seen) of
     [] ->
-      lager:warning("Forwarding join original node ~p dropped", [Node]);
+      ?LOG_WARNING("Forwarding join original node ~p dropped", [Node]);
     Nodes ->
       forward_forward_join1(ForwardJoin1, Nodes)
   end;
@@ -507,7 +508,7 @@ forward_forward_join(ForwardJoin = #{ttl := TTL, sender := Sender, node := Node}
   ForwardJoin1 = ForwardJoin#{ttl => TTL - 1, sender := node()},
   case ordsets:del_element(Sender, ActiveView) of
     [] ->
-      lager:warning("Forwarding join original node ~p dropped", [Node]);
+      ?LOG_WARNING("Forwarding join original node ~p dropped", [Node]);
     Nodes ->
       forward_forward_join1(ForwardJoin1, Nodes)
   end.
@@ -524,7 +525,7 @@ forward_forward_join1(ForwardJoin, Nodes) when is_list(Nodes) ->
 -spec(handle_disconnect(disconnect(), state()) -> state()).
 handle_disconnect(_Disconnect = #{sender := Sender},
     State = #state{active_view = ActiveView, passive_view = PassiveView, monitors = Monitors}) ->
-  lager:info("Node ~p received disconnect from ~p", [node(), Sender]),
+  ?LOG_INFO("Node ~p received disconnect from ~p", [node(), Sender]),
   MonitorRef = node_to_monitor_ref(Sender, Monitors),
   Monitors1 = remove_monitor(MonitorRef, Monitors),
   ActiveView1 = ordsets:del_element(Sender, ActiveView),
@@ -538,7 +539,7 @@ handle_down_message(_DownMessage = {'DOWN', MonitorRef, process, _Info, Reason},
     false ->
       State;
     Node ->
-      lager:info("Lost active neighbor: ~p because: ~p", [Node, Reason]),
+      ?LOG_INFO("Lost active neighbor: ~p because: ~p", [Node, Reason]),
       Monitors1 = remove_monitor(MonitorRef, Monitors),
       ActiveView1 = ordsets:del_element(Node, ActiveView),
       PassiveView1 = ordsets:add_element(Node, PassiveView),
@@ -569,7 +570,7 @@ maybe_neighbor(State = #state{fixed_seed = FixedSeed, idx = Idx, unfilled_active
     %% Let's try to reconnect to the contact nodes
     {ActiveView, []} ->
       reschedule_maybe_neighbor(10000),
-      lager:debug("Trying to connect to node from passive view, but passive view empty"),
+      ?LOG_DEBUG("Trying to connect to node from passive view, but passive view empty"),
       ContactNodes = lashup_config:contact_nodes(),
       UnconnectedContactNodes = ordsets:subtract(ContactNodes, ActiveView),
       State#state{passive_view = UnconnectedContactNodes};
@@ -594,11 +595,11 @@ maybe_gm_neighbor(Timeout, _State = #state{unfilled_active_set_count = Count, ac
   %% This is to ensure that there isn't a dependency loop between us and gm
   case catch lashup_gm:get_neighbor_recommendations(ActiveViewSize) of
     {ok, Node} ->
-      lager:info("Get Neighbors Successful: ~p", [Node]),
+      ?LOG_INFO("Get Neighbors Successful: ~p", [Node]),
       send_neighbor_to(Timeout, Node, low),
       Node;
     Error ->
-      lager:info("Get Neighbors Unsuccessful: ~p", [Error]),
+      ?LOG_INFO("Get Neighbors Unsuccessful: ~p", [Error]),
       ok
   end;
 maybe_gm_neighbor(_Timeout, _State) ->
@@ -613,7 +614,7 @@ send_neighbor(Timeout, PassiveView, Priority, Idx, FixedSeed) when length(Passiv
 
 -spec(send_neighbor_to(Timeout :: non_neg_integer(), Node :: node(), Priority :: high | low) -> ok).
 send_neighbor_to(Timeout, Node, Priority) when is_integer(Timeout) ->
-  lager:debug("Sending neighbor to: ~p", [Node]),
+  ?LOG_DEBUG("Sending neighbor to: ~p", [Node]),
   Ref = timer:send_after(Timeout * 3, {tried_neighbor, Node}),
   cast(Node, #{message => neighbor, ref => Ref, priority => Priority, sender => node()}).
 
@@ -622,7 +623,7 @@ handle_neighbor(_Neighbor = #{priority := low, sender := Sender, ref := Ref},
     State = #state{active_view = ActiveView, active_view_size = ActiveViewSize})
     when length(ActiveView) == ActiveViewSize ->
   %% The Active neighbor list is full
-  lager:info("Denied neighbor request from ~p because active view full", [Sender]),
+  ?LOG_INFO("Denied neighbor request from ~p because active view full", [Sender]),
   PassiveView = State#state.passive_view,
   cast(Sender, #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView}),
   State;
@@ -635,7 +636,7 @@ handle_neighbor(_Neighbor = #{sender := Sender, ref := Ref}, State) ->
       cast(Sender, #{message => neighbor_accept, sender => node(), ref => Ref}),
       NewState;
     {error, NewState = #state{passive_view = PassiveView}} ->
-      lager:warning("Failed to add neighbor ~p to active view on neighbor message", [Sender]),
+      ?LOG_WARNING("Failed to add neighbor ~p to active view on neighbor message", [Sender]),
       NeighborDeny = #{message => neighbor_deny, sender => node(), ref => Ref, passive_view => PassiveView},
       cast(Sender, NeighborDeny),
       NewState
@@ -653,7 +654,7 @@ handle_neighbor_deny(NeighborDeny = #{message := neighbor_deny, sender := Sender
   timer:cancel(Ref),
   ActiveView = State#state.active_view,
   PassiveView = State#state.passive_view,
-  lager:debug("Denied from joining ~p, while active view ~p, passive view: ~p", [Sender, ActiveView, PassiveView]),
+  ?LOG_DEBUG("Denied from joining ~p, while active view ~p, passive view: ~p", [Sender, ActiveView, PassiveView]),
   schedule_disconnect(Sender),
   State1 = neighbor_deny_combine_passive_view(NeighborDeny, State),
   push_state(State1),
@@ -695,7 +696,7 @@ check_monitors(#state{active_view = ActiveView, monitors = Monitors}) ->
     fun(Node) ->
       case node_to_monitor_ref(Node, Monitors) of
         false ->
-          lager:error("Node ~p lacks of a monitor reference: ~p", [Node, Monitors]),
+          ?LOG_ERROR("Node ~p lacks of a monitor reference: ~p", [Node, Monitors]),
           error({no_monitor_ref, Node});
         Ref when is_reference(Ref) ->
           ok
@@ -710,7 +711,7 @@ check_monitors(#state{active_view = ActiveView, monitors = Monitors}) ->
     SortedMonitoredNodes ->
       ok;
     _Other ->
-      lager:error("Duplicate monitored nodes: ~p", [MonitoredNodes]),
+      ?LOG_ERROR("Duplicate monitored nodes: ~p", [MonitoredNodes]),
       error(duplicate_monitored_nodes)
   end,
   %% Ensure there aren't excess monitors
@@ -758,7 +759,7 @@ handle_shuffle(Shuffle = #{node := Node, sender := Sender, ttl := TTL}, State = 
   PotentialNodes1 = ordsets:del_element(Sender, PotentialNodes),
   case PotentialNodes1 of
     [] ->
-      lager:debug("Handling shuffle early, because no nodes to send it to"),
+      ?LOG_DEBUG("Handling shuffle early, because no nodes to send it to"),
       State1 = do_shuffle(Shuffle, State),
       push_state(State1),
       State1;
@@ -785,7 +786,7 @@ do_shuffle(_Shuffle = #{active_view := RemoteActiveView, passive_view := RemoteP
 
 %% It returns how long to wait until to shuffle again
 try_shuffle(_State = #state{active_view = []}) ->
-  lager:info("Could not shuffle because active view empty"),
+  ?LOG_INFO("Could not shuffle because active view empty"),
   10000;
 try_shuffle(_State = #state{active_view = ActiveView, passive_view = PassiveView, passive_view_size = PVS}) ->
   %% TODO:
@@ -989,10 +990,10 @@ handle_recognize_pong(_Pong = #{now := _Now, receiving_node := Node},
       %% Something kinda weird has happened
       %% This can reasonably happen from late pongs
       %% TODO: Record it
-      lager:info("Late Pong from Node: ~p, already moved to passive view", [Node]);
+      ?LOG_INFO("Late Pong from Node: ~p, already moved to passive view", [Node]);
     {false, false} ->
       %% This is bad
-      lager:warning("Pong from unknown node: ~p, not in active nor passive veiws", [Node])
+      ?LOG_WARNING("Pong from unknown node: ~p, not in active nor passive veiws", [Node])
   end.
   %% {true, true} should never happen. If it does, we _should_ crash.
 

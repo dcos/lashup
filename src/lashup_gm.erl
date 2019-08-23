@@ -2,6 +2,7 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("kernel/include/inet.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("lashup.hrl").
@@ -85,7 +86,7 @@ handle_call({get_neighbor_recommendations, ActiveViewSize}, _From, State) ->
   Reply = handle_get_neighbor_recommendations(ActiveViewSize),
   {reply, Reply, State};
 handle_call(Request, _From, State) ->
-  lager:debug("Received unknown request: ~p", [Request]),
+  ?LOG_DEBUG("Received unknown request: ~p", [Request]),
   {reply, ok, State}.
 
 handle_cast({compressed, Data}, State) when is_binary(Data) ->
@@ -95,7 +96,7 @@ handle_cast({sync, Pid}, State) ->
   handle_sync(Pid, State),
   {noreply, State};
 handle_cast(#{message := remote_event, from := From, event := #{message := updated_node} = UpdatedNode}, State) ->
-  %lager:debug("Received Updated Node: ~p", [UpdatedNode]),
+  % ?LOG_DEBUG("Received Updated Node: ~p", [UpdatedNode]),
   State1 = handle_updated_node(From, UpdatedNode, State),
   {noreply, State1, lashup_utils:hibernate()};
 handle_cast(update_node, State) ->
@@ -177,10 +178,10 @@ check_member(Node, Subscriptions) ->
       case catch lashup_gm_fanout:start_monitor(Node) of
         {ok, {Pid, Monitor}} ->
           Subscription = #subscription{node = Node, pid = Pid, monitor_ref = Monitor},
-          lager:debug("Added handler for node: ~p", [Node]),
+          ?LOG_DEBUG("Added handler for node: ~p", [Node]),
           [Subscription | Subscriptions];
         Else ->
-          lager:debug("Unable to add handler for node: ~p, error: ~p", [Node, Else]),
+          ?LOG_DEBUG("Unable to add handler for node: ~p, error: ~p", [Node, Else]),
           Subscriptions
       end;
     _ ->
@@ -230,7 +231,7 @@ update_node(NewValue, Reason, State) ->
   handle_updated_node(node(), Message, State).
 
 handle_updated_node(_From, UpdatedNode = #{ttl := TTL}, State) when TTL < 0 ->
-  lager:warning("TTL Exceeded on Updated Node: ~p", [UpdatedNode]),
+  ?LOG_WARNING("TTL Exceeded on Updated Node: ~p", [UpdatedNode]),
   State;
 
 handle_updated_node(From, UpdatedNode = #{node := Node}, State) ->
@@ -318,7 +319,7 @@ forward(NewUpdatedNode = #{ttl := TTL}, _State = #state{subscribers = Subscriber
 
 
 handle_nodedown(Node, State = #state{subscriptions = Subscriptions, subscribers = Subscribers}) ->
-  lager:debug("Removing subscription (nodedown) from node: ~p", [Node]),
+  ?LOG_DEBUG("Removing subscription (nodedown) from node: ~p", [Node]),
   Subscriptions1 = lists:keydelete(Node, #subscription.node, Subscriptions),
   Subscribers1 = lists:keydelete(Node, #subscriber.node, Subscribers),
   prometheus_gauge:set(lashup, gm_subscriptions, [], length(Subscriptions1)),

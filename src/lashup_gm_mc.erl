@@ -2,6 +2,8 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([
   start_link/0,
@@ -178,7 +180,7 @@ maybe_ingest(MulticastPacket) ->
 
 -spec(maybe_forward_packet(multicast_packet()) -> ok).
 maybe_forward_packet(_MulticastPacket = #{ttl := 0}) ->
-  lager:warning("TTL Exceeded on Multicast Packet"),
+  ?LOG_WARNING("TTL Exceeded on Multicast Packet"),
   ok;
 maybe_forward_packet(MulticastPacket0 = #{tree := Tree, ttl := TTL}) ->
   MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
@@ -189,7 +191,7 @@ maybe_forward_packet(MulticastPacket0 = #{fakeroot := FakeRoot, ttl := TTL, orig
       MulticastPacket1 = MulticastPacket0#{ttl := TTL - 1},
       forward_packet(MulticastPacket1, Tree);
     false ->
-      lager:warning("Dropping multicast packet due to unknown root: ~p", [Origin]),
+      ?LOG_WARNING("Dropping multicast packet due to unknown root: ~p", [Origin]),
       ok
   end.
 
@@ -203,7 +205,7 @@ bsend(MulticastPacket, Children) ->
   lists:foreach(fun (Child) ->
     case erlang:send({?MODULE, Child}, MulticastPacket, [noconnect]) of
       noconnect ->
-        lager:warning("Dropping packet due to stale tree");
+        ?LOG_WARNING("Dropping packet due to stale tree");
       _Result ->
         prometheus_counter:inc(
           lashup, mc_outgoing_bytes_total, [],

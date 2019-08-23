@@ -2,6 +2,7 @@
 -author("sdhillon").
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
 
 %% API
@@ -190,7 +191,7 @@ write_lclock(Node, LClock) ->
     {atomic, _} ->
       ok;
     {aborted, Reason} ->
-      lager:error("Couldn't write to nclock table because ~p", [Reason]),
+      ?LOG_ERROR("Couldn't write to nclock table because ~p", [Reason]),
       {error, Reason}
   after
     prometheus_summary:observe(
@@ -243,7 +244,7 @@ handle_info({lashup_gm_mc_event, Event = #{ref := Ref}}, State = #state{mc_ref =
   prometheus_gauge:set(lashup, kv_message_queue_length, [], MsgQueueLen),
   case MsgQueueLen > MaxMsgQueueLen of
     true ->
-      lager:error("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
+      ?LOG_ERROR("lashup_kv: message box is overflowed, ~p", [MsgQueueLen]),
       prometheus_counter:inc(lashup, kv_message_queue_overflows_total, [], 1),
       {noreply, State, lashup_utils:hibernate()};
     false ->
@@ -294,10 +295,10 @@ init_db(Nodes) ->
     ok ->
       ok;
     {timeout, BadTables} ->
-      lager:alert("Couldn't initialize mnesia tables: ~p", [BadTables]),
+      ?LOG_ALERT("Couldn't initialize mnesia tables: ~p", [BadTables]),
       init:stop(1);
     {error, Error} ->
-      lager:alert("Couldn't initialize mnesia tables: ~p", [Error]),
+      ?LOG_ALERT("Couldn't initialize mnesia tables: ~p", [Error]),
       init:stop(1)
   end.
 
@@ -392,10 +393,10 @@ check_map(NewKV = #kv2{key = Key}) ->
     Size when Size > ?REJECT_OBJECT_SIZE_MB * 1000000 ->
       {error, value_too_large};
     Size when Size > (?WARN_OBJECT_SIZE_MB + ?REJECT_OBJECT_SIZE_MB) / 2 * 1000000 ->
-      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes (REJECTION IMMINENT)", [Key, Size]),
+      ?LOG_WARNING("WARNING: Object '~p' is growing too large at ~p bytes (REJECTION IMMINENT)", [Key, Size]),
       ok;
     Size when Size > ?WARN_OBJECT_SIZE_MB * 1000000 ->
-      lager:warning("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
+      ?LOG_WARNING("WARNING: Object '~p' is growing too large at ~p bytes", [Key, Size]),
       ok;
     _ ->
       ok
@@ -456,7 +457,7 @@ get_lclock(ReadFun, Key) ->
 handle_lashup_gm_mc_event(#{payload := #{type := full_update} = Payload}, State) ->
   handle_full_update(Payload, State);
 handle_lashup_gm_mc_event(Payload, State) ->
-  lager:debug("Unknown GM MC event: ~p", [Payload]),
+  ?LOG_DEBUG("Unknown GM MC event: ~p", [Payload]),
   State.
 
 -spec(mk_full_update_fun(Key :: key(),  RemoteMap :: riak_dt_map:dt_map(),
