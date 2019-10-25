@@ -576,7 +576,6 @@ init_op_metrics() ->
   prometheus_counter:new([
     {registry, lashup},
     {name, kv_message_queue_overflows_total},
-    {labels, [type]},
     {help, "Total number of messages dropped due to queue overflows."}
   ]).
 
