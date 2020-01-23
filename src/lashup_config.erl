@@ -51,7 +51,9 @@
   ping_log_base/0,
   gc_timeout/0,
   aae_route_event_wait/0,
-  update_contact_nodes/1
+  update_contact_nodes/1,
+  mnesia_sync_log/0,
+  enable_mnesia_sync_log/1
 ]).
 
 %% @doc
@@ -197,3 +199,12 @@ get_env(Var, Default) ->
 -spec(update_contact_nodes([node()]) -> ok).
 update_contact_nodes(Nodes) ->
   application:set_env(lashup, contact_nodes, Nodes).
+
+-spec(mnesia_sync_log() -> boolean()).
+mnesia_sync_log() ->
+  get_env(mnesia_sync_log, true).
+
+-spec(enable_mnesia_sync_log(boolean()) -> ok).
+enable_mnesia_sync_log(Value) ->
+  application:set_env(lashup, mnesia_sync_log, Value).
+

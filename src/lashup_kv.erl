@@ -372,8 +372,13 @@ handle_op(Key, Op, OldVClock, State) ->
   Fun = mk_write_fun(Key, OldVClock, Op),
   try mnesia:sync_transaction(Fun) of
     {atomic, NewKV} ->
-      ok = mnesia:sync_log(),
-      dumped = mnesia:dump_log(),
+      case lashup_config:mnesia_sync_log() of
+        true ->
+          ok = mnesia:sync_log(),
+          dumped = mnesia:dump_log();
+        false ->
+          ok
+      end,
       propagate(NewKV),
       NewValue = riak_dt_map:value(NewKV#kv2.map),
       State0 = notify_subscribers(Key, State),
